@@ -7,7 +7,8 @@ def test_index_requires_login():
     client = TestClient(main.app)
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "/login" in resp.text
+    assert 'action="/login"' in resp.text
+    assert "Google" not in resp.text
     assert "Hoş geldiniz" not in resp.text
 
 
@@ -49,17 +50,17 @@ import pytest  # noqa: E402
 from creds import PASSWORD  # noqa: E402
 
 
-def login_as(client, email):
+def login_as(client, username):
     """Starlette SessionMiddleware'in imzaladığı oturum çerezini üretir."""
-    data = base64.b64encode(json.dumps({"user": {"email": email}}).encode())
+    data = base64.b64encode(json.dumps({"user": {"username": username}}).encode())
     client.cookies.set("session", itsdangerous.TimestampSigner(main.SECRET_KEY).sign(data).decode())
 
 
 @pytest.fixture
 def admin_client(monkeypatch, servers_file):
-    monkeypatch.setattr(main, "ALLOWED_EMAILS", {"admin@example.com"})
+    monkeypatch.setattr(main.authenticator, "allowed_users", {"admin"})
     client = TestClient(main.app)
-    login_as(client, "Admin@Example.com")
+    login_as(client, "admin")
     return client
 
 
@@ -70,20 +71,26 @@ def add_form(**overrides):
     return form
 
 
-def test_panel_rejects_unlisted_email(monkeypatch, servers_file):
-    monkeypatch.setattr(main, "ALLOWED_EMAILS", {"admin@example.com"})
+def test_panel_redirects_to_login_without_session(servers_file):
+    resp = TestClient(main.app).get("/", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
+
+
+def test_panel_rejects_user_not_in_allowed_users(monkeypatch, servers_file):
+    monkeypatch.setattr(main.authenticator, "allowed_users", {"admin"})
     client = TestClient(main.app)
-    login_as(client, "someone@gmail.com")
-    assert client.get("/").status_code == 403
+    login_as(client, "baskasi")
+    assert client.get("/", follow_redirects=False).status_code == 303
     assert client.post("/servers", data=add_form(), follow_redirects=False).status_code == 403
     assert main.load_servers() == {}
 
 
-def test_panel_rejects_everyone_when_allowed_emails_empty(monkeypatch, servers_file):
-    monkeypatch.setattr(main, "ALLOWED_EMAILS", set())
+def test_any_cockpit_user_allowed_when_allowed_users_empty(monkeypatch, servers_file):
+    monkeypatch.setattr(main.authenticator, "allowed_users", set())
     client = TestClient(main.app)
-    login_as(client, "admin@example.com")
-    assert client.get("/").status_code == 403
+    login_as(client, "herhangi")
+    assert client.get("/").status_code == 200
 
 
 def test_add_server_encrypts_password(admin_client):

@@ -9,6 +9,9 @@ services:
       - "7435:7435"
     env_file:
       - .env
+    # COCKPIT_AUTH_URL varsayılanı host makinedeki Cockpit'e erişir
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
       - /root/.ssh:/root/.ssh:ro

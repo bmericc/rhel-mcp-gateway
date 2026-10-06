@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-authlib
 itsdangerous
 websockets
 pydantic
