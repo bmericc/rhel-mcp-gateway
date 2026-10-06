@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  public-gateway:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: public-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: public-gateway/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -v
