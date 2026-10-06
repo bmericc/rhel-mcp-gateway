@@ -2,7 +2,7 @@
 
 Her araç, sunucuda çalıştırılacak sabit komutları (argv listesi) kendisi kurar;
 kullanıcıdan gelen değerler doğrulanır ve shell'e her zaman quote edilerek verilir.
-Komutların nasıl çalıştırılacağı (SSH, ileride Cockpit) `Runner` ile soyutlanmıştır.
+Komutların nasıl çalıştırılacağı (Cockpit veya SSH) `Runner` ile soyutlanmıştır.
 """
 import json
 import re
@@ -17,10 +17,11 @@ class CommandResult(NamedTuple):
     exit_status: int | None
     stdout: str
     stderr: str
+    via: str = "ssh"
 
 
 # runner(argv, privileged=False, timeout=60) -> CommandResult
-# privileged=True: root olmayan kullanıcıda komut `sudo -n` ile çalıştırılır
+# privileged=True: SSH'ta root olmayan kullanıcıda `sudo -n`, Cockpit'te superuser ile çalıştırılır
 Runner = Callable[..., Awaitable[CommandResult]]
 
 
@@ -94,6 +95,7 @@ def truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
 def result_dict(r: CommandResult) -> dict:
     return {
         "user": r.user,
+        "via": r.via,
         "exit_status": r.exit_status,
         "stdout": truncate(r.stdout),
         "stderr": truncate(r.stderr),

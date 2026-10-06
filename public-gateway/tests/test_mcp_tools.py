@@ -85,7 +85,7 @@ async def test_list_servers_empty(servers_file):
 async def test_list_servers_returns_saved(servers_file, sample_server):
     servers_file(sample_server)
     result = await call("list_servers", {})
-    assert json.loads(result.content[0].text) == sample_server
+    assert json.loads(result.content[0].text) == {"prod-db": {**sample_server["prod-db"], "cockpit": False}}
 
 
 async def test_run_remote_command_unknown_server(servers_file, fake_ssh):
