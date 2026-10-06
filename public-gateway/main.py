@@ -3,7 +3,7 @@ import json
 import asyncio
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth
@@ -12,7 +12,8 @@ import asyncssh
 # MCP Kütüphaneleri
 from mcp.server import Server
 import mcp.types as types
-from mcp.server.sse import SsseServerTransport # Veya standart sse transport
+from mcp.server.sse import SseServerTransport
+from starlette.routing import Mount, Route
 
 app = FastAPI()
 
@@ -101,6 +102,8 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         except Exception as e:
             return [types.TextContent(type="text", text=f"SSH Bağlantı Hatası: {str(e)}")]
 
+    raise ValueError(f"Bilinmeyen araç: {name}")
+
 # FastAPI Web Uç Noktaları
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -145,24 +148,35 @@ async def logout(request: Request):
     return RedirectResponse(url='/', status_code=303)
 
 # --- MCP SSE Transport Entegrasyonu ---
-from mcp.server.sse import SseServerTransport
-from starlette.routing import Mount, Route
+# Sonda "/" olmalı: aksi halde her POST /messages isteği 307 ile /messages/'e yönlenir
+sse = SseServerTransport("/messages/")
 
-sse = SseServerTransport("/messages")
+MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
 async def handle_sse(request: Request):
+    # /sse herkese açıksa, URL'yi bilen herkes kayıtlı sunucularda komut çalıştırabilir.
+    # /messages/ istekleri tahmin edilemez session_id ile korunur.
+    if MCP_API_KEY:
+        auth_header = request.headers.get("authorization", "")
+        token = auth_header[7:] if auth_header.lower().startswith("bearer ") else request.query_params.get("token", "")
+        if token != MCP_API_KEY:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
     async with sse.connect_sse(
         request.scope, request.receive, request._send
     ) as streams:
         await mcp_server.run(
             streams[0], streams[1], mcp_server.create_initialization_options()
         )
+    # Bağlantı kapandığında Starlette bir Response bekler; None dönerse TypeError fırlar
+    return Response()
 
 # FastAPI route'larına MCP SSE ekleme
 app.routes.append(Route("/sse", endpoint=handle_sse))
-app.routes.append(Mount("/messages", app=sse.handle_post_message))
+app.routes.append(Mount("/messages/", app=sse.handle_post_message))
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 7435))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    # Reverse proxy (https) arkasında url_for doğru şemayı üretsin diye X-Forwarded-* başlıklarına güven
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, proxy_headers=True, forwarded_allow_ips="*")

@@ -6,5 +6,5 @@ websockets
 pydantic
 requests
 asyncssh
-httpx2
-mcp
+httpx
+mcp>=1.10,<2
