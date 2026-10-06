@@ -48,6 +48,42 @@ def save_servers(servers: Dict[str, Dict[str, Any]]):
     with open(SERVERS_FILE, "w") as f:
         json.dump(servers, f, indent=4)
 
+# --- SSH Giriş Ayarları ---
+# Denenecek kullanıcılar ve key klasörleri, sırasıyla: "kullanici:/ssh/klasoru,..."
+SSH_LOGINS = os.getenv("SSH_LOGINS", "root:/root/.ssh,bmericc:/home/bmericc/.ssh")
+SSH_KEY_NAMES = ("id_ed25519", "id_ecdsa", "id_rsa")
+
+def parse_ssh_logins(value: str) -> list[tuple[str, str]]:
+    logins = []
+    for item in value.split(","):
+        user, _, ssh_dir = item.strip().partition(":")
+        if user and ssh_dir:
+            logins.append((user.strip(), ssh_dir.strip()))
+    return logins
+
+def find_ssh_keys(ssh_dir: str) -> list[str]:
+    return [p for p in (os.path.join(ssh_dir, n) for n in SSH_KEY_NAMES) if os.path.isfile(p)]
+
+def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """Önce sunucuya tanımlı kullanıcı, ardından SSH_LOGINS'teki diğer kullanıcılar denenir."""
+    logins = parse_ssh_logins(SSH_LOGINS)
+    candidates = []
+    cfg_user = cfg.get("user")
+    if cfg_user:
+        if cfg.get("ssh_key_path"):
+            keys = [cfg["ssh_key_path"]]
+        else:
+            keys = find_ssh_keys(dict(logins).get(cfg_user, ""))
+        if keys:
+            candidates.append((cfg_user, keys))
+    for user, ssh_dir in logins:
+        if user == cfg_user:
+            continue
+        keys = find_ssh_keys(ssh_dir)
+        if keys:
+            candidates.append((user, keys))
+    return candidates
+
 # --- MCP Sunucu Tanımları ---
 mcp_server = Server("rhel-fleet-gateway")
 
@@ -61,7 +97,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="run_remote_command",
-            description="Kayıtlı bir uzak RHEL sunucusunda RSA key ile güvenli bir komut çalıştırır.",
+            description="Kayıtlı bir uzak RHEL sunucusunda SSH key ile komut çalıştırır. Sunucuya tanımlı kullanıcı reddedilirse diğer kullanıcılar (örn. root, bmericc) sırayla denenir.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -88,19 +124,31 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             return [types.TextContent(type="text", text=f"Hata: '{server_name}' sunucusu hafızada bulunamadı.")]
         
         cfg = servers[server_name]
-        try:
-            async with asyncssh.connect(
-                cfg["host"], 
-                port=cfg.get("port", 22), 
-                username=cfg["user"], 
-                client_keys=[cfg["ssh_key_path"]], 
-                known_hosts=None
-            ) as conn:
-                result = await conn.run(command, check=False)
-                output = f"Exit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
-                return [types.TextContent(type="text", text=output)]
-        except Exception as e:
-            return [types.TextContent(type="text", text=f"SSH Bağlantı Hatası: {str(e)}")]
+        candidates = login_candidates(cfg)
+        if not candidates:
+            return [types.TextContent(type="text", text=f"Hata: '{server_name}' için kullanılabilir SSH key bulunamadı.")]
+
+        denied = []
+        for user, keys in candidates:
+            try:
+                async with asyncssh.connect(
+                    cfg["host"],
+                    port=cfg.get("port", 22),
+                    username=user,
+                    client_keys=keys,
+                    known_hosts=None
+                ) as conn:
+                    result = await conn.run(command, check=False)
+                    output = f"User: {user}\nExit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
+                    return [types.TextContent(type="text", text=output)]
+            except asyncssh.PermissionDenied as e:
+                # Kimlik doğrulama reddedildi: sıradaki kullanıcıyı dene
+                denied.append(f"{user}: {e.reason}")
+            except Exception as e:
+                # Ağ/bağlantı hatasında diğer kullanıcıları denemenin anlamı yok
+                return [types.TextContent(type="text", text=f"SSH Bağlantı Hatası: {str(e)}")]
+
+        return [types.TextContent(type="text", text="SSH Kimlik Doğrulama Hatası, denenen kullanıcılar:\n" + "\n".join(denied))]
 
     raise ValueError(f"Bilinmeyen araç: {name}")
 
@@ -116,7 +164,7 @@ async def index(request: Request):
     
     servers = load_servers()
     servers_html = "".join([
-        f"<li><b>{s['name']}</b> ({s['user']}@{s['host']}:{s.get('port', 22)})</li>" 
+        f"<li><b>{s['name']}</b> ({s.get('user', 'otomatik')}@{s['host']}:{s.get('port', 22)})</li>" 
         for s in servers.values()
     ]) if servers else "<li>Henüz tanımlı sunucu yok.</li>"
     

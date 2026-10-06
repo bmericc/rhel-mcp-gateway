@@ -38,3 +38,22 @@ def sample_server():
             "ssh_key_path": "/root/.ssh/id_rsa",
         }
     }
+
+
+@pytest.fixture(autouse=True)
+def ssh_dirs(tmp_path, monkeypatch):
+    """SSH_LOGINS'i boş geçici klasörlere yönlendirir; gerçek ~/.ssh'a dokunulmaz.
+
+    Dönen fonksiyon ilgili kullanıcının klasörüne sahte key dosyası ekler.
+    """
+    dirs = {"root": tmp_path / "root-ssh", "bmericc": tmp_path / "bmericc-ssh"}
+    for d in dirs.values():
+        d.mkdir()
+    monkeypatch.setattr(main, "SSH_LOGINS", ",".join(f"{u}:{d}" for u, d in dirs.items()))
+
+    def add_key(user, name="id_rsa"):
+        path = dirs[user] / name
+        path.write_text("fake key")
+        return str(path)
+
+    return add_key
