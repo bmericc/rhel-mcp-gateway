@@ -90,9 +90,12 @@ class CockpitOAuthProvider:
     böylece gateway yeniden başlasa da kullanıcıların tekrar giriş yapması gerekmez.
     """
 
-    def __init__(self, store_path: str, login_url: str):
+    def __init__(self, store_path: str, login_url: str, token_policy: str = ""):
         self.store_path = store_path
         self.login_url = login_url
+        # Giriş token'ı (MCP_API_KEY) eklenir veya değiştirilirse eski oturumlar geçersiz olsun diye
+        # token'ın hash'i saklanır; farklıysa kayıtlı erişim/refresh token'ları silinir.
+        self.token_policy = _hash(token_policy) if token_policy else ""
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.access_tokens: dict[str, AccessToken] = {}
         self.refresh_tokens: dict[str, RefreshToken] = {}
@@ -111,6 +114,10 @@ class CockpitOAuthProvider:
         except Exception:
             return
         self.clients = {k: OAuthClientInformationFull.model_validate(v) for k, v in data.get("clients", {}).items()}
+        if data.get("token_policy", "") != self.token_policy:
+            # Giriş kuralları değişti: herkes yeniden giriş yapmalı
+            self._save()
+            return
         self.access_tokens = {k: AccessToken.model_validate(v) for k, v in data.get("access_tokens", {}).items()}
         self.refresh_tokens = {k: RefreshToken.model_validate(v) for k, v in data.get("refresh_tokens", {}).items()}
 
@@ -119,6 +126,7 @@ class CockpitOAuthProvider:
         self.access_tokens = {k: v for k, v in self.access_tokens.items() if not v.expires_at or v.expires_at > now}
         self.refresh_tokens = {k: v for k, v in self.refresh_tokens.items() if not v.expires_at or v.expires_at > now}
         data = {
+            "token_policy": self.token_policy,
             "clients": {k: v.model_dump(mode="json") for k, v in self.clients.items()},
             "access_tokens": {k: v.model_dump(mode="json") for k, v in self.access_tokens.items()},
             "refresh_tokens": {k: v.model_dump(mode="json") for k, v in self.refresh_tokens.items()},
@@ -155,6 +163,11 @@ class CockpitOAuthProvider:
             return None
         client = self.clients.get(entry[0])
         return (client.client_name if client else None) or entry[0]
+
+    def pending_resource(self, request_id: str) -> str | None:
+        """Bekleyen yetkilendirme isteğinin RFC 8707 resource değeri (istemcinin bağlandığı URL)."""
+        entry = self.pending.get(request_id)
+        return entry[1].resource if entry else None
 
     def complete_authorization(self, request_id: str, username: str) -> str | None:
         """Başarılı Cockpit girişinden sonra istemcinin redirect adresini (code ile) döner."""

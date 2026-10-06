@@ -44,6 +44,14 @@ class LiveServer:
 
 
 @pytest.fixture
+def access_token(monkeypatch, tmp_path):
+    """Cockpit girişi + erişim token'ı ile alınmış gibi bir OAuth erişim token'ı üretir."""
+    monkeypatch.setattr(main.oauth_provider, "store_path", str(tmp_path / "oauth.json"))
+    monkeypatch.setattr(main.authenticator, "allowed_users", set())
+    return main.oauth_provider._issue("test-client", ["mcp"], "admin", None).access_token
+
+
+@pytest.fixture
 def live_server(monkeypatch, servers_file):
     monkeypatch.setattr(main, "MCP_API_KEY", "xxx")
 
@@ -74,8 +82,8 @@ def live_server(monkeypatch, servers_file):
     logging.getLogger("uvicorn.access").removeHandler(access)
 
 
-async def test_sse_roundtrip(live_server):
-    async with sse_client(f"{live_server.url}/sse?token=xxx") as (read, write):
+async def test_sse_roundtrip(live_server, access_token):
+    async with sse_client(f"{live_server.url}/sse", headers={"Authorization": f"Bearer {access_token}"}) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
@@ -91,7 +99,11 @@ async def test_sse_roundtrip(live_server):
     assert 202 in live_server.status_codes()
 
 
-async def test_sse_bearer_header(live_server):
-    async with sse_client(f"{live_server.url}/sse", headers={"Authorization": "Bearer xxx"}) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+async def test_access_token_alone_is_not_enough(live_server):
+    # Erişim token'ı (MCP_API_KEY) tek başına giriş sağlamaz; Cockpit girişi de gerekir
+    import httpx
+
+    async with httpx.AsyncClient(trust_env=False) as client:
+        for kwargs in ({"params": {"token": "xxx"}}, {"headers": {"Authorization": "Bearer xxx"}}):
+            resp = await client.get(f"{live_server.url}/sse", **kwargs)
+            assert resp.status_code == 401

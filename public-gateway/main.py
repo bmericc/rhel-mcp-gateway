@@ -6,6 +6,7 @@ import base64
 import hashlib
 import secrets
 import shlex
+from urllib.parse import urlencode
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Dict, Any
@@ -26,7 +27,7 @@ import mcp.types as types
 from mcp.server.sse import SseServerTransport
 from starlette.routing import Mount, Route
 from pydantic import AnyHttpUrl
-from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
+from mcp.server.auth.routes import create_auth_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 
 app = FastAPI()
@@ -49,7 +50,24 @@ SERVERS_FILE = "data/servers.json"
 OAUTH_STORE_FILE = "data/oauth.json"
 
 authenticator = auth.CockpitAuthenticator(COCKPIT_AUTH_URL, COCKPIT_AUTH_VERIFY_TLS, ALLOWED_USERS)
-oauth_provider = auth.CockpitOAuthProvider(OAUTH_STORE_FILE, f"{PUBLIC_URL}/oauth/login")
+# Cockpit girişine ek olarak istenen erişim token'ı (ikinci faktör). Boşsa sadece Cockpit girişi yeter.
+# MCP istemcisinin bağlandığı URL'de ?token=... olarak verilirse giriş sayfasında ayrıca sorulmaz.
+MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+
+def login_token_ok(value: str | None) -> bool:
+    if not MCP_API_KEY:
+        return True
+    return bool(value) and secrets.compare_digest(value, MCP_API_KEY)
+
+def token_from_url(url: str | None) -> str | None:
+    """URL'deki ?token= değerini döner (RFC 8707 resource veya istek URL'si)."""
+    if not url:
+        return None
+    from urllib.parse import parse_qs, urlsplit
+    values = parse_qs(urlsplit(url).query).get("token")
+    return values[0] if values else None
+
+oauth_provider = auth.CockpitOAuthProvider(OAUTH_STORE_FILE, f"{PUBLIC_URL}/oauth/login", token_policy=MCP_API_KEY)
 
 def load_servers() -> Dict[str, Dict[str, Any]]:
     os.makedirs(os.path.dirname(SERVERS_FILE), exist_ok=True)
@@ -477,7 +495,7 @@ async def delete_server(name: str, request: Request):
     return RedirectResponse(url="/", status_code=303)
 
 def login_page(action: str, title: str, error: str = "", note: str = "", hidden: Dict[str, str] | None = None,
-               status_code: int = 200) -> HTMLResponse:
+               status_code: int = 200, ask_token: bool = False) -> HTMLResponse:
     hidden_inputs = "".join(
         f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'>" for k, v in (hidden or {}).items()
     )
@@ -490,21 +508,32 @@ def login_page(action: str, title: str, error: str = "", note: str = "", hidden:
           {hidden_inputs}
           <label>Kullanıcı adı</label><input name="username" autocomplete="username" required autofocus>
           <label>Şifre</label><input name="password" type="password" autocomplete="current-password" required>
+          {'<label>Erişim token&#x27;ı</label><input name="token" type="password" autocomplete="off" required>' if ask_token else ''}
           <span></span><button type="submit">Giriş Yap</button>
         </form>
     """, status_code=status_code)
 
+TOKEN_ERROR = "Erişim token'ı hatalı."
+
+def _token_fields(url_token: str | None) -> tuple[bool, Dict[str, str]]:
+    """URL'de geçerli token varsa formda sorma, gizli alanla taşı."""
+    if login_token_ok(url_token):
+        return False, ({"token": url_token} if url_token else {})
+    return True, {}
+
 @app.get("/login", response_class=HTMLResponse)
-async def login_form(request: Request):
-    return login_page("/login", "RHEL MCP Gateway - Giriş")
+async def login_form(request: Request, token: str | None = None):
+    ask_token, hidden = _token_fields(token)
+    return login_page("/login", "RHEL MCP Gateway - Giriş", hidden=hidden, ask_token=ask_token)
 
 @app.post("/login")
 async def login_submit(request: Request):
     form = await request.form()
     username = (form.get("username") or "").strip()
-    error = await authenticator.login(username, form.get("password") or "")
+    # Token Cockpit'ten önce kontrol edilir: token'sız denemeler şifreyi hiç sınayamaz
+    error = TOKEN_ERROR if not login_token_ok(form.get("token")) else await authenticator.login(username, form.get("password") or "")
     if error:
-        return login_page("/login", "RHEL MCP Gateway - Giriş", error=error, status_code=401)
+        return login_page("/login", "RHEL MCP Gateway - Giriş", error=error, status_code=401, ask_token=bool(MCP_API_KEY))
     request.session['user'] = {"username": username}
     return RedirectResponse(url='/', status_code=303)
 
@@ -518,6 +547,7 @@ async def oauth_login_form(request_id: str = Query(alias="request")):
         "/oauth/login", "MCP İstemcisine Erişim İzni",
         note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
         hidden={"request": request_id},
+        ask_token=not login_token_ok(token_from_url(oauth_provider.pending_resource(request_id))),
     )
 
 @app.post("/oauth/login")
@@ -528,12 +558,15 @@ async def oauth_login_submit(request: Request):
     if client_name is None:
         return HTMLResponse("Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.", status_code=400)
     username = (form.get("username") or "").strip()
-    error = await authenticator.login(username, form.get("password") or "")
+    # Token: istemcinin bağlandığı URL'den (?token=) ya da formdan
+    url_token = token_from_url(oauth_provider.pending_resource(request_id))
+    token_ok = login_token_ok(url_token) or login_token_ok(form.get("token"))
+    error = TOKEN_ERROR if not token_ok else await authenticator.login(username, form.get("password") or "")
     if error:
         return login_page(
             "/oauth/login", "MCP İstemcisine Erişim İzni", error=error,
             note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
-            hidden={"request": request_id}, status_code=401,
+            hidden={"request": request_id}, status_code=401, ask_token=not login_token_ok(url_token),
         )
     redirect = oauth_provider.complete_authorization(request_id, username)
     return RedirectResponse(url=redirect, status_code=302)
@@ -547,41 +580,44 @@ async def logout(request: Request):
 # Sonda "/" olmalı: aksi halde her POST /messages isteği 307 ile /messages/'e yönlenir
 sse = SseServerTransport("/messages/")
 
-# Opsiyonel sabit token (eski kurulumlarla uyumluluk için); boşsa devre dışı
-MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 MCP_RESOURCE_URL = f"{PUBLIC_URL}/sse"
 RESOURCE_METADATA_URL = f"{PUBLIC_URL}/.well-known/oauth-protected-resource/sse"
 
 async def authenticate_mcp(request: Request) -> str | None:
     """MCP isteğini doğrular; başarılıysa kullanıcı adını döner.
 
-    Kabul edilenler: OAuth erişim token'ı (Bearer), Cockpit kullanıcı adı/şifresi (Basic),
-    ve tanımlıysa MCP_API_KEY (Bearer veya ?token=).
+    Kabul edilenler:
+    - OAuth erişim token'ı (Bearer): giriş sırasında Cockpit + erişim token'ı zaten doğrulandı.
+    - Cockpit kullanıcı adı/şifresi (Basic): MCP_API_KEY tanımlıysa ayrıca X-MCP-Token başlığı
+      veya ?token= ile erişim token'ı da gerekir.
+    Erişim token'ı tek başına giriş sağlamaz.
     """
     header = request.headers.get("authorization", "")
-    scheme = header[:7].lower()
-    if scheme == "bearer ":
-        token = header[7:].strip()
-        if MCP_API_KEY and secrets.compare_digest(token, MCP_API_KEY):
-            return "api-key"
-        access = await oauth_provider.load_access_token(token)
+    if header[:7].lower() == "bearer ":
+        access = await oauth_provider.load_access_token(header[7:].strip())
         if access and access.subject and authenticator.is_allowed(access.subject):
             return access.subject
         return None
     if header[:6].lower() == "basic ":
+        token = request.headers.get("x-mcp-token") or request.query_params.get("token")
+        if not login_token_ok(token):
+            return None
         return await authenticator.check_basic(header)
-    query_token = request.query_params.get("token", "")
-    if MCP_API_KEY and query_token and secrets.compare_digest(query_token, MCP_API_KEY):
-        return "api-key"
     return None
 
 async def handle_sse(request: Request):
     # /messages/ istekleri tahmin edilemez session_id ile korunur; kimlik doğrulama /sse'de yapılır.
     if await authenticate_mcp(request) is None:
+        # URL'deki geçerli token metadata adresine taşınır; istemci bunu OAuth isteğindeki
+        # "resource" alanında geri gönderir ve giriş sayfası token'ı ayrıca sormaz.
+        metadata_url = RESOURCE_METADATA_URL
+        url_token = request.query_params.get("token")
+        if MCP_API_KEY and login_token_ok(url_token):
+            metadata_url += "?" + urlencode({"token": url_token})
         return JSONResponse(
             {"error": "invalid_token", "error_description": "Cockpit hesabıyla giriş gerekli"},
             status_code=401,
-            headers={"WWW-Authenticate": f'Bearer error="invalid_token", resource_metadata="{RESOURCE_METADATA_URL}"'},
+            headers={"WWW-Authenticate": f'Bearer error="invalid_token", resource_metadata="{metadata_url}"'},
         )
 
     async with sse.connect_sse(
@@ -604,12 +640,26 @@ app.routes.extend(create_auth_routes(
     client_registration_options=ClientRegistrationOptions(enabled=True, valid_scopes=[auth.SCOPE], default_scopes=[auth.SCOPE]),
     revocation_options=RevocationOptions(enabled=True),
 ))
-app.routes.extend(create_protected_resource_routes(
-    resource_url=AnyHttpUrl(MCP_RESOURCE_URL),
-    authorization_servers=[AnyHttpUrl(PUBLIC_URL)],
-    scopes_supported=[auth.SCOPE],
-    resource_name="RHEL MCP Gateway",
-))
+
+async def protected_resource_metadata(request: Request):
+    """RFC 9728 metadata. Geçerli ?token= varsa resource adresine eklenir (bkz. handle_sse)."""
+    cors = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS"}
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors)
+    resource = MCP_RESOURCE_URL
+    url_token = request.query_params.get("token")
+    if MCP_API_KEY and login_token_ok(url_token):
+        resource += "?" + urlencode({"token": url_token})
+    return JSONResponse({
+        "resource": resource,
+        "authorization_servers": [PUBLIC_URL + "/"],
+        "scopes_supported": [auth.SCOPE],
+        "bearer_methods_supported": ["header"],
+        "resource_name": "RHEL MCP Gateway",
+    }, headers=cors)
+
+app.routes.append(Route("/.well-known/oauth-protected-resource/sse", endpoint=protected_resource_metadata,
+                        methods=["GET", "OPTIONS"]))
 
 if __name__ == "__main__":
     import uvicorn
