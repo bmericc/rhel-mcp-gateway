@@ -53,10 +53,10 @@ Giriş iki parçalıdır: **Cockpit kullanıcı adı/şifresi** ve `MCP_API_KEY`
 
 | Yöntem | Kullanım |
 | --- | --- |
-| **OAuth 2.1** (önerilen) | İstemci bağlanınca tarayıcıda giriş sayfası açılır: Cockpit kullanıcı adı/şifresi + erişim token'ı. Giriş yapılınca istemci token alır (1 saat; refresh token 30 gün). |
+| **OAuth 2.1** (önerilen) | İstemci bağlanınca tarayıcıda giriş sayfası açılır: kullanıcı adı, Cockpit parolası ve gateway parolası (`MCP_API_KEY`). Giriş yapılınca istemci token alır (1 saat; refresh token 30 gün). |
 | **HTTP Basic** | `Authorization: Basic base64(kullanıcı:şifre)` + erişim token'ı (`X-MCP-Token: <token>` başlığı veya `?token=<token>`) |
 
-Erişim token'ı MCP adresine eklenirse (`https://<PUBLIC_URL>/sse?token=<token>`) giriş sayfası token'ı ayrıca sormaz; yalnızca Cockpit kullanıcı adı ve şifresi istenir. Adreste yoksa veya yanlışsa sayfada token alanı çıkar. Web panelinde de aynısı geçerlidir (`/login?token=<token>`).
+Gateway parolası MCP adresine eklenirse (`https://<PUBLIC_URL>/sse?token=<MCP_API_KEY>`) giriş sayfası onu ayrıca sormaz; yalnızca kullanıcı adı ve Cockpit parolası istenir. Adreste yoksa veya yanlışsa sayfada ikinci parola alanı çıkar. Web panelinde de aynısı geçerlidir (`/login?token=<token>`).
 
 **claude.ai:** *Settings → Connectors → Add custom connector* bölümüne `https://<PUBLIC_URL>/sse?token=<token>` adresini girin. Bağlanırken açılan sayfada Cockpit hesabınızla giriş yapın.
 

@@ -261,7 +261,7 @@ def test_web_login_asks_for_token(cockpit, login_token, servers_file):
     logins = len(cockpit.fake.logins)
     resp = client.post("/login", data={"username": "admin", "password": PASSWORD})
     assert resp.status_code == 401
-    assert "Erişim token&#x27;ı hatalı" in resp.text
+    assert "Gateway parolası hatalı" in resp.text
     # Token yanlışsa şifre Cockpit'e hiç gönderilmez
     assert len(cockpit.fake.logins) == logins
 
@@ -276,7 +276,7 @@ def test_web_login_asks_for_token(cockpit, login_token, servers_file):
 def test_web_login_token_from_url(cockpit, login_token, servers_file):
     client = TestClient(main.app)
     page = client.get("/login", params={"token": LOGIN_TOKEN}).text
-    assert "Erişim token" not in page
+    assert "Gateway parolası" not in page
     assert f"name='token' value='{LOGIN_TOKEN}'" in page
     # URL'deki token yanlışsa form yine sorar
     assert 'name="token"' in client.get("/login", params={"token": "yanlis-xxx"}).text
@@ -297,7 +297,7 @@ def test_oauth_uses_token_from_connection_url(cockpit, provider, login_token):
     client = TestClient(main.app)
     resource = f"{main.MCP_RESOURCE_URL}?token={LOGIN_TOKEN}"
     _, _, _, resp = oauth_flow(client, resource=resource)
-    assert "Erişim token" not in client.last_login_page
+    assert "Gateway parolası" not in client.last_login_page
     assert resp.status_code == 302
     assert "code=" in resp.headers["location"]
 

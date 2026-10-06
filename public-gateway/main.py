@@ -502,18 +502,18 @@ def login_page(action: str, title: str, error: str = "", note: str = "", hidden:
     return HTMLResponse(f"""
         {PAGE_STYLE}
         <h2>{html.escape(title)}</h2>
-        <p class="note">{note}Cockpit hesabınızla giriş yapın ({html.escape(COCKPIT_AUTH_URL)}).</p>
+        <p class="note">{note}Cockpit kullanıcı adınız ve parolanızla giriş yapın ({html.escape(COCKPIT_AUTH_URL)}).</p>
         {f"<p class='err'>{html.escape(error)}</p>" if error else ""}
         <form class="login" method="post" action="{html.escape(action)}">
           {hidden_inputs}
           <label>Kullanıcı adı</label><input name="username" autocomplete="username" required autofocus>
-          <label>Şifre</label><input name="password" type="password" autocomplete="current-password" required>
-          {'<label>Erişim token&#x27;ı</label><input name="token" type="password" autocomplete="off" required>' if ask_token else ''}
+          <label>Cockpit parolası</label><input name="password" type="password" autocomplete="current-password" required>
+          {'<label>Gateway parolası</label><input name="token" type="password" autocomplete="off" required>' if ask_token else ''}
           <span></span><button type="submit">Giriş Yap</button>
         </form>
     """, status_code=status_code)
 
-TOKEN_ERROR = "Erişim token'ı hatalı."
+TOKEN_ERROR = "Gateway parolası hatalı."
 
 def _token_fields(url_token: str | None) -> tuple[bool, Dict[str, str]]:
     """URL'de geçerli token varsa formda sorma, gizli alanla taşı."""
