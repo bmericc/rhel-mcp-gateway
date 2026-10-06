@@ -9,6 +9,11 @@ from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth
 import asyncssh
 
+# MCP Kütüphaneleri
+from mcp.server import Server
+import mcp.types as types
+from mcp.server.sse import SsseServerTransport # Veya standart sse transport
+
 app = FastAPI()
 
 app.add_middleware(
@@ -42,13 +47,61 @@ def save_servers(servers: Dict[str, Dict[str, Any]]):
     with open(SERVERS_FILE, "w") as f:
         json.dump(servers, f, indent=4)
 
-class ServerModel(BaseModel):
-    name: str
-    host: str
-    port: int = 22
-    user: str = "root"
-    ssh_key_path: str = "/root/.ssh/id_rsa"
+# --- MCP Sunucu Tanımları ---
+mcp_server = Server("rhel-fleet-gateway")
 
+@mcp_server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="list_servers",
+            description="Hafızada kayıtlı olan tüm RHEL sunucularını listeler.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="run_remote_command",
+            description="Kayıtlı bir uzak RHEL sunucusunda RSA key ile güvenli bir komut çalıştırır.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "server_name": {"type": "string", "description": "Sunucu adı (örn: prod-db)"},
+                    "command": {"type": "string", "description": "Çalıştırılacak Linux komutu (örn: systemctl status nginx)"}
+                },
+                "required": ["server_name", "command"]
+            }
+        )
+    ]
+
+@mcp_server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    servers = load_servers()
+    
+    if name == "list_servers":
+        return [types.TextContent(type="text", text=json.dumps(servers, indent=4))]
+
+    elif name == "run_remote_command":
+        server_name = arguments.get("server_name")
+        command = arguments.get("command")
+        
+        if server_name not in servers:
+            return [types.TextContent(type="text", text=f"Hata: '{server_name}' sunucusu hafızada bulunamadı.")]
+        
+        cfg = servers[server_name]
+        try:
+            async with asyncssh.connect(
+                cfg["host"], 
+                port=cfg.get("port", 22), 
+                username=cfg["user"], 
+                client_keys=[cfg["ssh_key_path"]], 
+                known_hosts=None
+            ) as conn:
+                result = await conn.run(command, check=False)
+                output = f"Exit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
+                return [types.TextContent(type="text", text=output)]
+        except Exception as e:
+            return [types.TextContent(type="text", text=f"SSH Bağlantı Hatası: {str(e)}")]
+
+# FastAPI Web Uç Noktaları
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     user = request.session.get('user')
@@ -60,82 +113,17 @@ async def index(request: Request):
     
     servers = load_servers()
     servers_html = "".join([
-        f"<li><b>{s['name']}</b> ({s['user']}@{s['host']}:{s.get('port', 22)}) - Key: {s['ssh_key_path']}</li>" 
+        f"<li><b>{s['name']}</b> ({s['user']}@{s['host']}:{s.get('port', 22)})</li>" 
         for s in servers.values()
     ]) if servers else "<li>Henüz tanımlı sunucu yok.</li>"
     
     return f"""
         <h2>Hoş geldiniz, {user.get('email')}!</h2>
-        <p>MCP Gateway aktif (Port: 7435).</p>
-        <h3>Kayıtlı Sunucular (Hafıza):</h3>
+        <p>MCP Gateway aktif. SSE Uç Noktası: <code>https://mcp.kalehost.net/sse</code></p>
+        <h3>Kayıtlı Sunucular:</h3>
         <ul>{servers_html}</ul>
-        <hr>
-        <h4>Yeni Sunucu Ekle:</h4>
-        <form action="/add-server" method="POST" style="display:flex; flex-direction:column; width:300px; gap:8px;">
-            <input type="text" name="name" placeholder="Sunucu Adı (örn: prod-db)" required>
-            <input type="text" name="host" placeholder="IP veya Domain" required>
-            <input type="number" name="port" value="22" placeholder="SSH Port">
-            <input type="text" name="user" value="root" placeholder="Kullanıcı Adı">
-            <input type="text" name="ssh_key_path" value="/root/.ssh/id_rsa" placeholder="RSA Key Yolu">
-            <button type="submit">Sunucuyu Kaydet</button>
-        </form>
         <br><a href="/logout">Çıkış Yap</a>
     """
-
-@app.post("/add-server")
-async def add_server_form(request: Request):
-    form = await request.form()
-    servers = load_servers()
-    name = form.get("name")
-    
-    servers[name] = {
-        "name": name,
-        "host": form.get("host"),
-        "port": int(form.get("port", 22)),
-        "user": form.get("user", "root"),
-        "ssh_key_path": form.get("ssh_key_path", "/root/.ssh/id_rsa")
-    }
-    save_servers(servers)
-    return RedirectResponse(url='/', status_code=303)
-
-@app.post("/api/servers")
-async def api_add_server(server: ServerModel):
-    servers = load_servers()
-    servers[server.name] = server.dict()
-    save_servers(servers)
-    return {"status": "success", "message": f"'{server.name}' başarıyla kaydedildi."}
-
-@app.get("/api/servers")
-async def api_list_servers():
-    return load_servers()
-
-@app.post("/api/run-command")
-async def api_run_command(data: dict):
-    server_name = data.get("server_name")
-    command = data.get("command")
-    
-    servers = load_servers()
-    if server_name not in servers:
-        raise HTTPException(status_code=404, detail="Sunucu hafızada bulunamadı.")
-    
-    cfg = servers[server_name]
-    try:
-        async with asyncssh.connect(
-            cfg["host"], 
-            port=cfg.get("port", 22), 
-            username=cfg["user"], 
-            client_keys=[cfg["ssh_key_path"]], 
-            known_hosts=None
-        ) as conn:
-            result = await conn.run(command, check=False)
-            return {
-                "server": server_name,
-                "exit_status": result.exit_status,
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SSH Bağlantı Hatası: {str(e)}")
 
 @app.get("/login")
 async def login(request: Request):
@@ -155,6 +143,24 @@ async def auth(request: Request):
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url='/', status_code=303)
+
+# --- MCP SSE Transport Entegrasyonu ---
+from mcp.server.sse import SseServerTransport
+from starlette.routing import Mount, Route
+
+sse = SseServerTransport("/messages")
+
+async def handle_sse(request: Request):
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
+        await mcp_server.run(
+            streams[0], streams[1], mcp_server.create_initialization_options()
+        )
+
+# FastAPI route'larına MCP SSE ekleme
+app.routes.append(Route("/sse", endpoint=handle_sse))
+app.routes.append(Mount("/messages", app=sse.handle_post_message))
 
 if __name__ == "__main__":
     import uvicorn

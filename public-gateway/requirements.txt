@@ -6,3 +6,5 @@ websockets
 pydantic
 requests
 asyncssh
+httpx2
+mcp
