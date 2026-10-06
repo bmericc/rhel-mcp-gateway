@@ -20,16 +20,16 @@ def test_logout_redirects():
 
 
 def test_sse_rejects_missing_token(monkeypatch):
-    monkeypatch.setattr(main, "MCP_API_KEY", "s3cret")
+    monkeypatch.setattr(main, "MCP_API_KEY", "xxx")
     client = TestClient(main.app)
     assert client.get("/sse").status_code == 401
 
 
 def test_sse_rejects_wrong_token(monkeypatch):
-    monkeypatch.setattr(main, "MCP_API_KEY", "s3cret")
+    monkeypatch.setattr(main, "MCP_API_KEY", "xxx")
     client = TestClient(main.app)
-    assert client.get("/sse?token=yanlis").status_code == 401
-    assert client.get("/sse", headers={"Authorization": "Bearer yanlis"}).status_code == 401
+    assert client.get("/sse?token=yyy").status_code == 401
+    assert client.get("/sse", headers={"Authorization": "Bearer yyy"}).status_code == 401
 
 
 def test_messages_endpoint_does_not_redirect():
