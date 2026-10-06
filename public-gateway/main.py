@@ -19,8 +19,6 @@ from cryptography.fernet import Fernet, InvalidToken
 import cockpit_client
 import fleet_tools
 
-import fleet_tools
-
 # MCP Kütüphaneleri
 from mcp.server import Server
 import mcp.types as types
