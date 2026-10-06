@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  gateway:
+    build: ./public-gateway
+    container_name: mcp-public-gateway
+    restart: always
+    ports:
+      - "80:80"
+    environment:
+      - GOOGLE_CLIENT_ID=sizin_google_client_id.apps.googleusercontent.com
+      - GOOGLE_CLIENT_SECRET=sizin_google_client_secret
+      - SECRET_KEY=cok_guvenli_ve_rastgele_bir_string
+    networks:
+      - mcp-net
+
+networks:
+  mcp-net:
+    driver: bridge
