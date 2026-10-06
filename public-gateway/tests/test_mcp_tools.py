@@ -1,5 +1,6 @@
 import json
 
+import asyncssh
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
@@ -34,12 +35,14 @@ class FakeConn:
 @pytest.fixture
 def fake_ssh(monkeypatch):
     calls = []
-    state = {"result": FakeResult(0, "active (running)\n", ""), "error": None}
+    state = {"result": FakeResult(0, "active (running)\n", ""), "error": None, "deny": set()}
 
     def connect(host, **kwargs):
         calls.append(("connect", host, kwargs))
         if state["error"]:
             raise state["error"]
+        if kwargs["username"] in state["deny"]:
+            raise asyncssh.PermissionDenied("Permission denied")
         return FakeConn(state["result"], calls)
 
     monkeypatch.setattr(main.asyncssh, "connect", connect)
@@ -85,6 +88,7 @@ async def test_run_remote_command_success(servers_file, sample_server, fake_ssh)
         "run_remote_command", {"server_name": "prod-db", "command": "systemctl status nginx"}
     )
     text = result.content[0].text
+    assert "User: admin" in text
     assert "Exit Status: 0" in text
     assert "active (running)" in text
 
@@ -126,3 +130,83 @@ async def test_unknown_tool_returns_error():
     result = await call("olmayan_arac", {})
     assert result.isError
     assert "Bilinmeyen araç: olmayan_arac" in result.content[0].text
+
+
+def connected_users(calls):
+    return [c[2]["username"] for c in calls if c[0] == "connect"]
+
+
+async def test_falls_back_to_bmericc_when_root_denied(servers_file, sample_server, fake_ssh, ssh_dirs):
+    sample_server["prod-db"]["user"] = "root"
+    servers_file(sample_server)
+    bmericc_key = ssh_dirs("bmericc", "id_ed25519")
+    calls, state = fake_ssh
+    state["deny"] = {"root"}
+
+    result = await call("run_remote_command", {"server_name": "prod-db", "command": "uptime"})
+
+    assert connected_users(calls) == ["root", "bmericc"]
+    assert calls[1][2]["client_keys"] == [bmericc_key]
+    assert "User: bmericc" in result.content[0].text
+
+
+async def test_server_without_user_tries_logins_in_order(servers_file, fake_ssh, ssh_dirs):
+    servers_file({"web": {"name": "web", "host": "10.0.0.9"}})
+    root_key = ssh_dirs("root")
+    ssh_dirs("bmericc")
+    calls, _ = fake_ssh
+
+    result = await call("run_remote_command", {"server_name": "web", "command": "uptime"})
+
+    assert connected_users(calls) == ["root"]
+    assert calls[0][2]["client_keys"] == [root_key]
+    assert "User: root" in result.content[0].text
+
+
+async def test_configured_user_without_key_path_uses_its_ssh_dir(servers_file, fake_ssh, ssh_dirs):
+    servers_file({"web": {"name": "web", "host": "10.0.0.9", "user": "bmericc"}})
+    ssh_dirs("root")
+    bmericc_key = ssh_dirs("bmericc")
+    calls, _ = fake_ssh
+
+    await call("run_remote_command", {"server_name": "web", "command": "uptime"})
+
+    assert connected_users(calls) == ["bmericc"]
+    assert calls[0][2]["client_keys"] == [bmericc_key]
+
+
+async def test_all_users_denied(servers_file, sample_server, fake_ssh, ssh_dirs):
+    servers_file(sample_server)
+    ssh_dirs("root")
+    ssh_dirs("bmericc")
+    calls, state = fake_ssh
+    state["deny"] = {"admin", "root", "bmericc"}
+
+    result = await call("run_remote_command", {"server_name": "prod-db", "command": "uptime"})
+
+    assert connected_users(calls) == ["admin", "root", "bmericc"]
+    text = result.content[0].text
+    assert "SSH Kimlik Doğrulama Hatası" in text
+    assert "root: Permission denied" in text
+    assert "bmericc: Permission denied" in text
+
+
+async def test_network_error_does_not_try_other_users(servers_file, sample_server, fake_ssh, ssh_dirs):
+    servers_file(sample_server)
+    ssh_dirs("bmericc")
+    calls, state = fake_ssh
+    state["error"] = OSError("Connection refused")
+
+    await call("run_remote_command", {"server_name": "prod-db", "command": "uptime"})
+
+    assert connected_users(calls) == ["admin"]
+
+
+async def test_no_keys_available(servers_file, fake_ssh):
+    servers_file({"web": {"name": "web", "host": "10.0.0.9"}})
+    calls, _ = fake_ssh
+
+    result = await call("run_remote_command", {"server_name": "web", "command": "uptime"})
+
+    assert "kullanılabilir SSH key bulunamadı" in result.content[0].text
+    assert calls == []

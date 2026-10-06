@@ -12,6 +12,7 @@ services:
     volumes:
       - ./data:/app/data
       - /root/.ssh:/root/.ssh:ro
+      - /home/bmericc/.ssh:/home/bmericc/.ssh:ro
     networks:
       - mcp-net
 
