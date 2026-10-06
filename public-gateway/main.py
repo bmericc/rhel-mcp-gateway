@@ -1,6 +1,8 @@
 import os
 import json
+import shlex
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
@@ -8,6 +10,8 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth
 import asyncssh
+
+import fleet_tools
 
 # MCP Kütüphaneleri
 from mcp.server import Server
@@ -84,8 +88,68 @@ def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list[str]]]:
             candidates.append((user, keys))
     return candidates
 
+class SSHError(Exception):
+    """Bağlantı kurulamadı veya hiçbir kullanıcı ile giriş yapılamadı."""
+
+@asynccontextmanager
+async def ssh_session(cfg: Dict[str, Any]):
+    """Sunucuya bağlanır; (kullanıcı, bağlantı) döner.
+
+    Kimlik doğrulama reddedilirse sıradaki kullanıcı denenir; ağ hatasında hemen vazgeçilir.
+    """
+    candidates = login_candidates(cfg)
+    if not candidates:
+        raise SSHError(f"Hata: '{cfg.get('name', cfg.get('host'))}' için kullanılabilir SSH key bulunamadı.")
+
+    denied = []
+    for user, keys in candidates:
+        try:
+            cm = asyncssh.connect(
+                cfg["host"],
+                port=cfg.get("port", 22),
+                username=user,
+                client_keys=keys,
+                known_hosts=None
+            )
+            conn = await cm.__aenter__()
+        except asyncssh.PermissionDenied as e:
+            # Kimlik doğrulama reddedildi: sıradaki kullanıcıyı dene
+            denied.append(f"{user}: {e.reason}")
+            continue
+        except Exception as e:
+            # Ağ/bağlantı hatasında diğer kullanıcıları denemenin anlamı yok
+            raise SSHError(f"SSH Bağlantı Hatası: {str(e)}") from e
+        try:
+            yield user, conn
+        finally:
+            await cm.__aexit__(None, None, None)
+        return
+
+    raise SSHError("SSH Kimlik Doğrulama Hatası, denenen kullanıcılar:\n" + "\n".join(denied))
+
+def make_runner(user: str, conn) -> fleet_tools.Runner:
+    async def run(argv, privileged: bool = False, timeout: int = fleet_tools.DEFAULT_TIMEOUT):
+        if isinstance(argv, str):
+            command = argv
+        else:
+            # Çıktıların ayrıştırılabilmesi için dil ayarını sabitle
+            command = shlex.join(["env", "LC_ALL=C", *argv])
+            if privileged and user != "root":
+                command = "sudo -n " + command
+        try:
+            result = await asyncio.wait_for(conn.run(command, check=False), timeout)
+        except asyncio.TimeoutError:
+            return fleet_tools.CommandResult(user, None, "", f"Komut {timeout} saniyede zaman aşımına uğradı.")
+        return fleet_tools.CommandResult(user, result.exit_status, result.stdout or "", result.stderr or "")
+    return run
+
+def text_result(value: Any) -> list[types.TextContent]:
+    return [types.TextContent(type="text", text=fleet_tools.to_text(value))]
+
 # --- MCP Sunucu Tanımları ---
 mcp_server = Server("rhel-fleet-gateway")
+
+SERVER_NAME_PROP = {"server_name": {"type": "string", "description": "Kayıtlı sunucu adı (örn: prod-db)"}}
 
 @mcp_server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -93,64 +157,92 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="list_servers",
             description="Hafızada kayıtlı olan tüm RHEL sunucularını listeler.",
-            inputSchema={"type": "object", "properties": {}}
+            inputSchema={"type": "object", "properties": {}},
+            annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
         ),
         types.Tool(
+            name="fleet_health",
+            description="Tüm kayıtlı sunucuların yük, çökmüş servis ve kök disk doluluğu özetini paralel olarak toplar.",
+            inputSchema={"type": "object", "properties": {}},
+            annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+        ),
+        *[spec.to_tool() for spec in fleet_tools.TOOLS],
+        types.Tool(
             name="run_remote_command",
-            description="Kayıtlı bir uzak RHEL sunucusunda SSH key ile komut çalıştırır. Sunucuya tanımlı kullanıcı reddedilirse diğer kullanıcılar (örn. root, bmericc) sırayla denenir.",
+            description=(
+                "Kayıtlı bir sunucuda serbest bir Linux komutu çalıştırır. Amaca özel bir araç varsa onu tercih edin. "
+                "Sunucuya tanımlı kullanıcı reddedilirse diğer kullanıcılar (örn. root, bmericc) sırayla denenir."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "server_name": {"type": "string", "description": "Sunucu adı (örn: prod-db)"},
-                    "command": {"type": "string", "description": "Çalıştırılacak Linux komutu (örn: systemctl status nginx)"}
+                    **SERVER_NAME_PROP,
+                    "command": {"type": "string", "description": "Çalıştırılacak Linux komutu (örn: systemctl status nginx)"},
+                    "confirm": {"type": "boolean", "description": "Komutu gerçekten çalıştırmak için true. Verilmezse sadece ne çalıştırılacağı gösterilir."},
                 },
                 "required": ["server_name", "command"]
-            }
-        )
+            },
+            annotations=types.ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False),
+        ),
     ]
+
+def confirmation_required(server_name: str, action: str) -> list[types.TextContent]:
+    return text_result(
+        f"Onay gerekli: '{server_name}' üzerinde şu işlem yapılacak:\n  {action}\n"
+        "Uygulamak için aynı aracı confirm: true ile tekrar çağırın."
+    )
+
+async def fleet_health(servers: Dict[str, Dict[str, Any]]) -> dict:
+    async def one(cfg):
+        try:
+            async with ssh_session(cfg) as (user, conn):
+                return await fleet_tools.fleet_health_for(make_runner(user, conn))
+        except Exception as e:
+            return {"error": str(e)}
+
+    names = list(servers)
+    results = await asyncio.gather(*(one(servers[n]) for n in names))
+    return dict(zip(names, results))
 
 @mcp_server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     servers = load_servers()
-    
+    arguments = arguments or {}
+
     if name == "list_servers":
         return [types.TextContent(type="text", text=json.dumps(servers, indent=4))]
 
-    elif name == "run_remote_command":
-        server_name = arguments.get("server_name")
-        command = arguments.get("command")
-        
-        if server_name not in servers:
-            return [types.TextContent(type="text", text=f"Hata: '{server_name}' sunucusu hafızada bulunamadı.")]
-        
-        cfg = servers[server_name]
-        candidates = login_candidates(cfg)
-        if not candidates:
-            return [types.TextContent(type="text", text=f"Hata: '{server_name}' için kullanılabilir SSH key bulunamadı.")]
+    if name == "fleet_health":
+        return text_result(await fleet_health(servers))
 
-        denied = []
-        for user, keys in candidates:
-            try:
-                async with asyncssh.connect(
-                    cfg["host"],
-                    port=cfg.get("port", 22),
-                    username=user,
-                    client_keys=keys,
-                    known_hosts=None
-                ) as conn:
-                    result = await conn.run(command, check=False)
-                    output = f"User: {user}\nExit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
-                    return [types.TextContent(type="text", text=output)]
-            except asyncssh.PermissionDenied as e:
-                # Kimlik doğrulama reddedildi: sıradaki kullanıcıyı dene
-                denied.append(f"{user}: {e.reason}")
-            except Exception as e:
-                # Ağ/bağlantı hatasında diğer kullanıcıları denemenin anlamı yok
-                return [types.TextContent(type="text", text=f"SSH Bağlantı Hatası: {str(e)}")]
+    spec = fleet_tools.TOOLS_BY_NAME.get(name)
+    if spec is None and name != "run_remote_command":
+        raise ValueError(f"Bilinmeyen araç: {name}")
 
-        return [types.TextContent(type="text", text="SSH Kimlik Doğrulama Hatası, denenen kullanıcılar:\n" + "\n".join(denied))]
+    server_name = arguments.get("server_name")
+    if server_name not in servers:
+        return text_result(f"Hata: '{server_name}' sunucusu hafızada bulunamadı.")
+    cfg = servers[server_name]
 
-    raise ValueError(f"Bilinmeyen araç: {name}")
+    try:
+        if name == "run_remote_command":
+            command = arguments.get("command")
+            if not arguments.get("confirm"):
+                return confirmation_required(server_name, command)
+            async with ssh_session(cfg) as (user, conn):
+                result = await make_runner(user, conn)(command)
+            output = f"User: {result.user}\nExit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
+            return text_result(output)
+
+        if not spec.read_only and not arguments.get("confirm"):
+            return confirmation_required(server_name, spec.preview(arguments))
+
+        async with ssh_session(cfg) as (user, conn):
+            return text_result(await spec.handler(make_runner(user, conn), arguments))
+    except SSHError as e:
+        return text_result(str(e))
+    except fleet_tools.ToolInputError as e:
+        raise ValueError(str(e)) from e
 
 # FastAPI Web Uç Noktaları
 @app.get("/", response_class=HTMLResponse)
