@@ -4,8 +4,7 @@ import subprocess
 import json
 import os
 
-# Public sunucunuzun adresi (Docker env veya doğrudan IP/Domain)
-GATEWAY_URL = os.getenv("GATEWAY_URL", "ws://sizin-public-sunucu-ip:80/ws/agent?agent_id=kurumsal-rhel-01")
+GATEWAY_URL = os.getenv("GATEWAY_URL", "ws://sizin-public-sunucu-ip:7435/ws/agent?agent_id=kurumsal-rhel-01")
 
 async def run_agent():
     while True:
@@ -21,7 +20,6 @@ async def run_agent():
                     
                     print(f"[>] Komut çalıştırılıyor: {command}")
                     
-                    # Yerel sistemde komutu çalıştır (systemctl, docker, df vb.)
                     proc = await asyncio.create_subprocess_shell(
                         command,
                         stdout=subprocess.PIPE,
