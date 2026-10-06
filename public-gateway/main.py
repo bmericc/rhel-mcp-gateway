@@ -4,18 +4,19 @@ import html
 import json
 import base64
 import hashlib
+import secrets
 import shlex
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
-from authlib.integrations.starlette_client import OAuth
 import asyncssh
 from cryptography.fernet import Fernet, InvalidToken
 
+import auth
 import cockpit_client
 import fleet_tools
 
@@ -24,28 +25,31 @@ from mcp.server import Server
 import mcp.types as types
 from mcp.server.sse import SseServerTransport
 from starlette.routing import Mount, Route
+from pydantic import AnyHttpUrl
+from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 
 app = FastAPI()
 
 SECRET_KEY = os.getenv("SECRET_KEY", "gizli-anahtar")
-# Web paneline (sunucu ekleme/silme) girebilecek Google hesapları, virgülle ayrılmış
-ALLOWED_EMAILS = {e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()}
+# Gateway'in dışarıdan erişilen adresi (OAuth yönlendirmeleri ve metadata için)
+PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:7435").rstrip("/")
+# Giriş doğrulaması yapılacak Cockpit (varsayılan: gateway'in çalıştığı host makine)
+COCKPIT_AUTH_URL = os.getenv("COCKPIT_AUTH_URL", "https://host.docker.internal:9090").rstrip("/")
+COCKPIT_AUTH_VERIFY_TLS = os.getenv("COCKPIT_AUTH_VERIFY_TLS", "").lower() in ("1", "true", "yes")
+# Boşsa Cockpit'e giriş yapabilen herkes; doluysa sadece listedeki kullanıcılar (virgülle ayrılmış)
+ALLOWED_USERS = {u.strip() for u in os.getenv("ALLOWED_USERS", "").split(",") if u.strip()}
 
 app.add_middleware(
     SessionMiddleware, 
     secret_key=SECRET_KEY
 )
 
-oauth = OAuth()
-oauth.register(
-    name='google',
-    client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
-    client_kwargs={'scope': 'openid email profile'}
-)
-
 SERVERS_FILE = "data/servers.json"
+OAUTH_STORE_FILE = "data/oauth.json"
+
+authenticator = auth.CockpitAuthenticator(COCKPIT_AUTH_URL, COCKPIT_AUTH_VERIFY_TLS, ALLOWED_USERS)
+oauth_provider = auth.CockpitOAuthProvider(OAUTH_STORE_FILE, f"{PUBLIC_URL}/oauth/login")
 
 def load_servers() -> Dict[str, Dict[str, Any]]:
     os.makedirs(os.path.dirname(SERVERS_FILE), exist_ok=True)
@@ -336,11 +340,10 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9.:_-]{1,253}$")
 
-def current_admin(request: Request) -> str | None:
-    """Oturumdaki kullanıcı ALLOWED_EMAILS içindeyse e-postasını döner."""
-    user = request.session.get('user') or {}
-    email = (user.get('email') or "").lower()
-    return email if email and email in ALLOWED_EMAILS else None
+def current_user(request: Request) -> str | None:
+    """Cockpit ile giriş yapmış ve hâlâ yetkili olan kullanıcının adı."""
+    username = (request.session.get('user') or {}).get('username')
+    return username if username and authenticator.is_allowed(username) else None
 
 PAGE_STYLE = """
 <style>
@@ -351,6 +354,7 @@ PAGE_STYLE = """
   fieldset { border: 1px solid #ddd; margin: 12px 0; }
   .note { color: #555; font-size: 13px; }
   .err { color: #b00020; }
+  form.login { display: grid; grid-template-columns: 140px 220px; gap: 8px; }
 </style>
 """
 
@@ -367,18 +371,9 @@ def server_row(cfg: Dict[str, Any]) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, error: str = ""):
-    user = request.session.get('user')
-    if not user:
-        return """
-        <h2>RHEL MCP Gateway - Giriş Yapın</h2>
-        <a href="/login" style="padding: 10px 20px; background: #4285F4; color: white; text-decoration: none; border-radius: 5px;">Google ile Giriş Yap</a>
-        """
-    if not current_admin(request):
-        return HTMLResponse(f"""
-            <h2>Yetkiniz yok</h2>
-            <p>{html.escape(user.get('email', ''))} hesabı bu paneli kullanamaz. Yönetici, e-postayı ALLOWED_EMAILS ayarına eklemeli.</p>
-            <a href="/logout">Çıkış Yap</a>
-        """, status_code=403)
+    username = current_user(request)
+    if not username:
+        return RedirectResponse(url="/login", status_code=303)
 
     servers = load_servers()
     rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='4'>Henüz tanımlı sunucu yok.</td></tr>"
@@ -386,8 +381,8 @@ async def index(request: Request, error: str = ""):
 
     return f"""
         {PAGE_STYLE}
-        <h2>Hoş geldiniz, {html.escape(user.get('email', ''))}!</h2>
-        <p>MCP Gateway aktif. SSE Uç Noktası: <code>https://mcp.kalehost.net/sse</code></p>
+        <h2>Hoş geldiniz, {html.escape(username)}!</h2>
+        <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
         <h3>Kayıtlı Sunucular</h3>
         <table>
           <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th></th></tr>
@@ -428,7 +423,7 @@ def _redirect_error(message: str) -> RedirectResponse:
 
 @app.post("/servers")
 async def save_server(request: Request):
-    if not current_admin(request):
+    if not current_user(request):
         return HTMLResponse("Yetkiniz yok", status_code=403)
     form = await request.form()
     field = lambda k: (form.get(k) or "").strip()
@@ -474,26 +469,74 @@ async def save_server(request: Request):
 
 @app.post("/servers/{name}/delete")
 async def delete_server(name: str, request: Request):
-    if not current_admin(request):
+    if not current_user(request):
         return HTMLResponse("Yetkiniz yok", status_code=403)
     servers = load_servers()
     servers.pop(name, None)
     save_servers(servers)
     return RedirectResponse(url="/", status_code=303)
 
-@app.get("/login")
-async def login(request: Request):
-    redirect_uri = request.url_for('auth')
-    return await oauth.google.authorize_redirect(request, redirect_uri)
+def login_page(action: str, title: str, error: str = "", note: str = "", hidden: Dict[str, str] | None = None,
+               status_code: int = 200) -> HTMLResponse:
+    hidden_inputs = "".join(
+        f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'>" for k, v in (hidden or {}).items()
+    )
+    return HTMLResponse(f"""
+        {PAGE_STYLE}
+        <h2>{html.escape(title)}</h2>
+        <p class="note">{note}Cockpit hesabınızla giriş yapın ({html.escape(COCKPIT_AUTH_URL)}).</p>
+        {f"<p class='err'>{html.escape(error)}</p>" if error else ""}
+        <form class="login" method="post" action="{html.escape(action)}">
+          {hidden_inputs}
+          <label>Kullanıcı adı</label><input name="username" autocomplete="username" required autofocus>
+          <label>Şifre</label><input name="password" type="password" autocomplete="current-password" required>
+          <span></span><button type="submit">Giriş Yap</button>
+        </form>
+    """, status_code=status_code)
 
-@app.get("/auth")
-async def auth(request: Request):
-    token = await oauth.google.authorize_access_token(request)
-    user = token.get('userinfo')
-    if not user:
-        user = await oauth.google.parse_id_token(request, token)
-    request.session['user'] = dict(user)
+@app.get("/login", response_class=HTMLResponse)
+async def login_form(request: Request):
+    return login_page("/login", "RHEL MCP Gateway - Giriş")
+
+@app.post("/login")
+async def login_submit(request: Request):
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    error = await authenticator.login(username, form.get("password") or "")
+    if error:
+        return login_page("/login", "RHEL MCP Gateway - Giriş", error=error, status_code=401)
+    request.session['user'] = {"username": username}
     return RedirectResponse(url='/', status_code=303)
+
+# --- MCP istemcileri için OAuth girişi (/authorize buraya yönlendirir) ---
+@app.get("/oauth/login", response_class=HTMLResponse)
+async def oauth_login_form(request_id: str = Query(alias="request")):
+    client_name = oauth_provider.pending_client_name(request_id)
+    if client_name is None:
+        return HTMLResponse("Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.", status_code=400)
+    return login_page(
+        "/oauth/login", "MCP İstemcisine Erişim İzni",
+        note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
+        hidden={"request": request_id},
+    )
+
+@app.post("/oauth/login")
+async def oauth_login_submit(request: Request):
+    form = await request.form()
+    request_id = form.get("request") or ""
+    client_name = oauth_provider.pending_client_name(request_id)
+    if client_name is None:
+        return HTMLResponse("Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.", status_code=400)
+    username = (form.get("username") or "").strip()
+    error = await authenticator.login(username, form.get("password") or "")
+    if error:
+        return login_page(
+            "/oauth/login", "MCP İstemcisine Erişim İzni", error=error,
+            note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
+            hidden={"request": request_id}, status_code=401,
+        )
+    redirect = oauth_provider.complete_authorization(request_id, username)
+    return RedirectResponse(url=redirect, status_code=302)
 
 @app.get("/logout")
 async def logout(request: Request):
@@ -504,16 +547,42 @@ async def logout(request: Request):
 # Sonda "/" olmalı: aksi halde her POST /messages isteği 307 ile /messages/'e yönlenir
 sse = SseServerTransport("/messages/")
 
+# Opsiyonel sabit token (eski kurulumlarla uyumluluk için); boşsa devre dışı
 MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+MCP_RESOURCE_URL = f"{PUBLIC_URL}/sse"
+RESOURCE_METADATA_URL = f"{PUBLIC_URL}/.well-known/oauth-protected-resource/sse"
+
+async def authenticate_mcp(request: Request) -> str | None:
+    """MCP isteğini doğrular; başarılıysa kullanıcı adını döner.
+
+    Kabul edilenler: OAuth erişim token'ı (Bearer), Cockpit kullanıcı adı/şifresi (Basic),
+    ve tanımlıysa MCP_API_KEY (Bearer veya ?token=).
+    """
+    header = request.headers.get("authorization", "")
+    scheme = header[:7].lower()
+    if scheme == "bearer ":
+        token = header[7:].strip()
+        if MCP_API_KEY and secrets.compare_digest(token, MCP_API_KEY):
+            return "api-key"
+        access = await oauth_provider.load_access_token(token)
+        if access and access.subject and authenticator.is_allowed(access.subject):
+            return access.subject
+        return None
+    if header[:6].lower() == "basic ":
+        return await authenticator.check_basic(header)
+    query_token = request.query_params.get("token", "")
+    if MCP_API_KEY and query_token and secrets.compare_digest(query_token, MCP_API_KEY):
+        return "api-key"
+    return None
 
 async def handle_sse(request: Request):
-    # /sse herkese açıksa, URL'yi bilen herkes kayıtlı sunucularda komut çalıştırabilir.
-    # /messages/ istekleri tahmin edilemez session_id ile korunur.
-    if MCP_API_KEY:
-        auth_header = request.headers.get("authorization", "")
-        token = auth_header[7:] if auth_header.lower().startswith("bearer ") else request.query_params.get("token", "")
-        if token != MCP_API_KEY:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # /messages/ istekleri tahmin edilemez session_id ile korunur; kimlik doğrulama /sse'de yapılır.
+    if await authenticate_mcp(request) is None:
+        return JSONResponse(
+            {"error": "invalid_token", "error_description": "Cockpit hesabıyla giriş gerekli"},
+            status_code=401,
+            headers={"WWW-Authenticate": f'Bearer error="invalid_token", resource_metadata="{RESOURCE_METADATA_URL}"'},
+        )
 
     async with sse.connect_sse(
         request.scope, request.receive, request._send
@@ -527,6 +596,20 @@ async def handle_sse(request: Request):
 # FastAPI route'larına MCP SSE ekleme
 app.routes.append(Route("/sse", endpoint=handle_sse))
 app.routes.append(Mount("/messages/", app=sse.handle_post_message))
+
+# OAuth 2.1 yetkilendirme sunucusu (/authorize, /token, /register, /revoke) ve metadata
+app.routes.extend(create_auth_routes(
+    oauth_provider,
+    issuer_url=AnyHttpUrl(PUBLIC_URL),
+    client_registration_options=ClientRegistrationOptions(enabled=True, valid_scopes=[auth.SCOPE], default_scopes=[auth.SCOPE]),
+    revocation_options=RevocationOptions(enabled=True),
+))
+app.routes.extend(create_protected_resource_routes(
+    resource_url=AnyHttpUrl(MCP_RESOURCE_URL),
+    authorization_servers=[AnyHttpUrl(PUBLIC_URL)],
+    scopes_supported=[auth.SCOPE],
+    resource_name="RHEL MCP Gateway",
+))
 
 if __name__ == "__main__":
     import uvicorn

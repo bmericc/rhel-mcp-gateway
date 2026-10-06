@@ -24,6 +24,20 @@ class CockpitError(Exception):
     """Cockpit'e bağlanılamadı veya giriş yapılamadı (SSH'a geçmek için sebep)."""
 
 
+class CockpitAuthError(CockpitError):
+    """Kullanıcı adı veya şifre Cockpit tarafından reddedildi."""
+
+
+async def check_login(url: str, user: str, password: str, verify_tls: bool = False, timeout: float = 10) -> None:
+    """Cockpit'e giriş yapılabiliyorsa sessizce döner.
+
+    Şifre yanlışsa CockpitAuthError, Cockpit'e ulaşılamazsa CockpitError fırlatır.
+    """
+    session = CockpitSession(url, user, password, verify_tls=verify_tls, connect_timeout=timeout)
+    # Sadece doğrulama: superuser köprüsü başlatılmasın
+    await session.login(superuser=False)
+
+
 class CockpitSession:
     def __init__(self, url: str, user: str, password: str, verify_tls: bool = False, connect_timeout: float = 10):
         self.url = url.rstrip("/")
@@ -47,7 +61,9 @@ class CockpitSession:
             ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
-    async def connect(self):
+    async def login(self, superuser: bool = True) -> httpx.Response:
+        """Sadece HTTP girişini yapar; başarılıysa "cockpit" çerezini içeren yanıtı döner."""
+        headers = {"X-Superuser": "any" if superuser else "none"}
         try:
             async with httpx.AsyncClient(verify=self._ssl_context() or True, trust_env=False,
                                          timeout=self.connect_timeout) as client:
@@ -55,14 +71,18 @@ class CockpitSession:
                     f"{self.url}/cockpit/login",
                     auth=(self.user, self.password),
                     # Yetki gerektiren işlemler için giriş şifresi sudo'da yeniden kullanılır
-                    headers={"X-Superuser": "any"},
+                    headers=headers,
                 )
         except httpx.HTTPError as e:
             raise CockpitError(f"Cockpit'e bağlanılamadı ({self.url}): {e}") from e
         if resp.status_code == 401:
-            raise CockpitError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
+            raise CockpitAuthError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
         if resp.status_code != 200 or "cockpit" not in resp.cookies:
             raise CockpitError(f"Cockpit girişi başarısız ({self.url}): HTTP {resp.status_code}")
+        return resp
+
+    async def connect(self):
+        resp = await self.login()
 
         ws_url = "ws" + self.url[len("http"):] + "/cockpit/socket"
         try:
