@@ -15,12 +15,13 @@ import threading
 import time
 
 import uvicorn
+from creds import PASSWORD
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-USERS = {"admin": ("secret", True), "plain": ("secret", False)}  # kullanıcı: (şifre, sudo yetkisi)
+USERS = {"admin": (PASSWORD, True), "plain": (PASSWORD, False)}  # kullanıcı: (şifre, sudo yetkisi)
 COOKIE = "fake-session"
 
 

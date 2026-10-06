@@ -46,6 +46,8 @@ import json  # noqa: E402
 import itsdangerous  # noqa: E402
 import pytest  # noqa: E402
 
+from creds import PASSWORD  # noqa: E402
+
 
 def login_as(client, email):
     """Starlette SessionMiddleware'in imzaladığı oturum çerezini üretir."""
@@ -63,7 +65,7 @@ def admin_client(monkeypatch, servers_file):
 
 def add_form(**overrides):
     form = {"name": "prod", "host": "192.168.0.98", "port": "22",
-            "cockpit_user": "bmericc", "cockpit_password": "s3cret"}
+            "cockpit_user": "bmericc", "cockpit_password": PASSWORD}
     form.update(overrides)
     return form
 
@@ -89,11 +91,11 @@ def test_add_server_encrypts_password(admin_client):
     assert resp.status_code == 303
     cfg = main.load_servers()["prod"]
     assert cfg["cockpit_user"] == "bmericc"
-    assert cfg["cockpit_password"] != "s3cret"
-    assert main.decrypt_secret(cfg["cockpit_password"]) == "s3cret"
+    assert cfg["cockpit_password"] != PASSWORD
+    assert main.decrypt_secret(cfg["cockpit_password"]) == PASSWORD
     page = admin_client.get("/").text
     assert "prod" in page and "bmericc" in page
-    assert "s3cret" not in page
+    assert PASSWORD not in page
 
 
 def test_update_keeps_password_when_blank(admin_client):
@@ -101,7 +103,7 @@ def test_update_keeps_password_when_blank(admin_client):
     admin_client.post("/servers", data=add_form(cockpit_password="", host="10.0.0.1"))
     cfg = main.load_servers()["prod"]
     assert cfg["host"] == "10.0.0.1"
-    assert main.decrypt_secret(cfg["cockpit_password"]) == "s3cret"
+    assert main.decrypt_secret(cfg["cockpit_password"]) == PASSWORD
 
 
 def test_cockpit_user_requires_password(admin_client):
@@ -127,7 +129,7 @@ def test_add_server_validation(admin_client, field, value):
 
 
 def test_page_escapes_html(admin_client, servers_file):
-    servers_file({"x": {"name": "x", "host": "h", "cockpit_user": "<script>alert(1)</script>", "cockpit_password": "e"}})
+    servers_file({"x": {"name": "x", "host": "h", "cockpit_user": "<script>alert(1)</script>"}})
     page = admin_client.get("/").text
     assert "<script>alert(1)</script>" not in page
     assert "&lt;script&gt;" in page

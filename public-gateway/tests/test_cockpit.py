@@ -7,6 +7,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import cockpit_client
 import main
+from creds import PASSWORD, WRONG_PASSWORD
 
 pytestmark = pytest.mark.anyio
 
@@ -20,7 +21,7 @@ def cockpit():
     live.stop()
 
 
-def session(cockpit, user="admin", password="secret"):
+def session(cockpit, user="admin", password=PASSWORD):
     return cockpit_client.CockpitSession(cockpit.url, user, password)
 
 
@@ -85,11 +86,11 @@ async def test_timeout(cockpit):
 
 async def test_wrong_password(cockpit):
     with pytest.raises(cockpit_client.CockpitError, match="girişi reddedildi"):
-        await session(cockpit, password="yanlis").connect()
+        await session(cockpit, password=WRONG_PASSWORD).connect()
 
 
 async def test_unreachable():
-    s = cockpit_client.CockpitSession("http://127.0.0.1:1", "admin", "secret", connect_timeout=2)
+    s = cockpit_client.CockpitSession("http://127.0.0.1:1", "admin", PASSWORD, connect_timeout=2)
     with pytest.raises(cockpit_client.CockpitError, match="bağlanılamadı"):
         await s.connect()
 
@@ -123,7 +124,7 @@ def ssh(monkeypatch):
     return commands
 
 
-def cockpit_server(url, password="secret", **extra):
+def cockpit_server(url, password=PASSWORD, **extra):
     cfg = {
         "name": "box", "host": "127.0.0.1", "user": "root", "ssh_key_path": "/k",
         "cockpit_url": url, "cockpit_user": "admin", "cockpit_password": main.encrypt_secret(password),
@@ -167,7 +168,7 @@ async def test_falls_back_to_ssh_when_cockpit_unreachable(servers_file, ssh):
 
 
 async def test_falls_back_to_ssh_on_wrong_password(cockpit, servers_file, ssh):
-    servers_file(cockpit_server(cockpit.url, password="yanlis"))
+    servers_file(cockpit_server(cockpit.url, password=WRONG_PASSWORD))
     data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
     assert data["connection"]["via"] == "ssh"
     assert "girişi reddedildi" in data["connection"]["cockpit_error"]
@@ -186,7 +187,7 @@ async def test_cockpit_and_ssh_both_fail(servers_file, monkeypatch, ssh_dirs):
 
 async def test_undecryptable_password_falls_back(cockpit, servers_file, ssh):
     cfg = cockpit_server(cockpit.url)
-    cfg["box"]["cockpit_password"] = "bozuk"
+    cfg["box"]["cockpit_password"] = "sifreli-olmayan-deger"
     servers_file(cfg)
     data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
     assert data["connection"]["via"] == "ssh"
@@ -207,7 +208,7 @@ def test_default_cockpit_url():
 
 
 def test_encrypt_roundtrip():
-    token = main.encrypt_secret("p@ss")
-    assert token != "p@ss"
-    assert main.decrypt_secret(token) == "p@ss"
+    token = main.encrypt_secret(PASSWORD)
+    assert token != PASSWORD
+    assert main.decrypt_secret(token) == PASSWORD
     assert main.decrypt_secret("bozuk") is None

@@ -7,6 +7,7 @@ import os
 import pytest
 
 import cockpit_client
+from creds import WRONG_PASSWORD
 
 URL = os.getenv("COCKPIT_TEST_URL")
 pytestmark = [
@@ -42,4 +43,4 @@ async def test_superuser():
 
 async def test_wrong_password():
     with pytest.raises(cockpit_client.CockpitError):
-        await session(password="kesinlikle-yanlis").connect()
+        await session(password=WRONG_PASSWORD).connect()
