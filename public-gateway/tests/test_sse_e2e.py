@@ -45,7 +45,7 @@ class LiveServer:
 
 @pytest.fixture
 def live_server(monkeypatch, servers_file):
-    monkeypatch.setattr(main, "MCP_API_KEY", "s3cret")
+    monkeypatch.setattr(main, "MCP_API_KEY", "xxx")
 
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -75,7 +75,7 @@ def live_server(monkeypatch, servers_file):
 
 
 async def test_sse_roundtrip(live_server):
-    async with sse_client(f"{live_server.url}/sse?token=s3cret") as (read, write):
+    async with sse_client(f"{live_server.url}/sse?token=xxx") as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
@@ -92,6 +92,6 @@ async def test_sse_roundtrip(live_server):
 
 
 async def test_sse_bearer_header(live_server):
-    async with sse_client(f"{live_server.url}/sse", headers={"Authorization": "Bearer s3cret"}) as (read, write):
+    async with sse_client(f"{live_server.url}/sse", headers={"Authorization": "Bearer xxx"}) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
