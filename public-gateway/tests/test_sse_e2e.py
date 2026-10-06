@@ -79,7 +79,7 @@ async def test_sse_roundtrip(live_server):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert {t.name for t in tools.tools} == {"list_servers", "run_remote_command"}
+            assert {"list_servers", "run_remote_command", "server_info"} <= {t.name for t in tools.tools}
             result = await session.call_tool("list_servers", {})
             assert result.content[0].text == "{}"
 

@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-authlib
 itsdangerous
 websockets
 pydantic
@@ -8,3 +7,4 @@ requests
 asyncssh
 httpx
 mcp>=1.10,<2
+cryptography
