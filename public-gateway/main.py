@@ -8,6 +8,7 @@ import secrets
 import shlex
 from urllib.parse import urlencode
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
@@ -372,43 +373,107 @@ PAGE_STYLE = """
   fieldset { border: 1px solid #ddd; margin: 12px 0; }
   .note { color: #555; font-size: 13px; }
   .err { color: #b00020; }
+  .ok { color: #1b7f3b; }
+  td form { display: inline; }
   form.login { display: grid; grid-template-columns: 140px 220px; gap: 8px; }
 </style>
 """
+
+CHECK_TIMEOUT = 10
+
+async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Sunucuya gerçekten bağlanıp basit bir komut çalıştırarak bilgileri doğrular.
+
+    Cockpit tanımlıysa Cockpit'in çalışması gerekir (SSH yedeği yalnızca bilgi olarak denenir);
+    tanımlı değilse SSH denenir.
+    """
+    checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    async def try_ssh() -> str | None:
+        try:
+            async with ssh_session(cfg) as (user, conn):
+                result = await make_runner(user, conn)("true", timeout=CHECK_TIMEOUT)
+            if result.exit_status != 0:
+                return f"SSH komutu başarısız: {result.stderr.strip() or result.exit_status}"
+            return None
+        except Exception as e:
+            return str(e)
+
+    if cfg.get("cockpit_user"):
+        password = decrypt_secret(cfg.get("cockpit_password", ""))
+        error = None
+        if password is None:
+            error = "Cockpit şifresi çözülemedi; şifreyi yeniden girin."
+        else:
+            session = cockpit_client.CockpitSession(
+                cockpit_url(cfg), cfg["cockpit_user"], password,
+                verify_tls=bool(cfg.get("cockpit_verify_tls")), connect_timeout=CHECK_TIMEOUT,
+            )
+            try:
+                await session.connect()
+                result = await session.spawn(["true"], timeout=CHECK_TIMEOUT)
+                if result.exit_status != 0:
+                    error = f"Cockpit üzerinden komut çalıştırılamadı: {result.stderr.strip() or result.exit_status}"
+            except cockpit_client.CockpitError as e:
+                error = str(e)
+            finally:
+                await session.close()
+        if error is None:
+            return {"ok": True, "via": "cockpit", "message": "Cockpit bağlantısı başarılı.", "at": checked_at}
+        ssh_error = await try_ssh()
+        fallback = "SSH yedeği çalışıyor." if ssh_error is None else "SSH yedeği de çalışmıyor."
+        return {"ok": False, "via": None, "message": f"{error} ({fallback})", "at": checked_at}
+
+    ssh_error = await try_ssh()
+    if ssh_error is None:
+        return {"ok": True, "via": "ssh", "message": "SSH bağlantısı başarılı.", "at": checked_at}
+    return {"ok": False, "via": None, "message": ssh_error, "at": checked_at}
 
 def server_row(cfg: Dict[str, Any]) -> str:
     e = lambda v: html.escape(str(v)) if v not in (None, "") else "—"
     name = cfg["name"]
     cockpit = f"{e(cfg['cockpit_user'])} @ {e(cockpit_url(cfg))}" if cfg.get("cockpit_user") else "—"
     ssh = f"{e(cfg.get('user') or 'otomatik')} @ {e(cfg['host'])}:{e(cfg.get('port', 22))}"
+    check = cfg.get("last_check")
+    if check:
+        mark, css = ("✓", "ok") if check.get("ok") else ("✗", "err")
+        status = (f"<span class='{css}' title='{e(check.get('message'))}'>{mark} {e(check.get('message'))}</span>"
+                  f"<br><span class='note'>{e(check.get('at'))}</span>")
+    else:
+        status = "<span class='note'>Test edilmedi</span>"
+    quoted = html.escape(name)
     return (
-        f"<tr><td><b>{e(name)}</b></td><td>{cockpit}</td><td>{ssh}</td>"
-        f"<td><form method='post' action='/servers/{html.escape(name)}/delete' "
-        f"onsubmit=\"return confirm('{html.escape(name)} silinsin mi?')\"><button>Sil</button></form></td></tr>"
+        f"<tr><td><b>{e(name)}</b></td><td>{cockpit}</td><td>{ssh}</td><td>{status}</td>"
+        f"<td><form method='post' action='/servers/{quoted}/test'><button>Test et</button></form> "
+        f"<form method='post' action='/servers/{quoted}/delete' "
+        f"onsubmit=\"return confirm('{quoted} silinsin mi?')\"><button>Sil</button></form></td></tr>"
     )
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request, error: str = ""):
+async def index(request: Request, error: str = "", info: str = ""):
     username = current_user(request)
     if not username:
         return RedirectResponse(url="/login", status_code=303)
 
     servers = load_servers()
-    rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='4'>Henüz tanımlı sunucu yok.</td></tr>"
+    rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='5'>Henüz tanımlı sunucu yok.</td></tr>"
     error_html = f"<p class='err'>{html.escape(error)}</p>" if error else ""
+    info_html = f"<p class='ok'>{html.escape(info)}</p>" if info else ""
 
     return f"""
         {PAGE_STYLE}
         <h2>Hoş geldiniz, {html.escape(username)}!</h2>
         <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
         <h3>Kayıtlı Sunucular</h3>
+        {info_html}
         <table>
-          <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th></th></tr>
+          <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th>Bağlantı durumu</th><th></th></tr>
           {rows}
         </table>
 
         <h3>Sunucu Ekle / Güncelle</h3>
-        <p class="note">Aynı adla kaydetmek mevcut sunucuyu günceller. Şifre alanı boş bırakılırsa mevcut şifre korunur.</p>
+        <p class="note">Aynı adla kaydetmek mevcut sunucuyu günceller. Şifre alanı boş bırakılırsa mevcut şifre korunur.
+        Kaydetmeden önce sunucuya bağlanılıp bilgiler doğrulanır; bağlantı kurulamazsa kayıt yapılmaz.</p>
         {error_html}
         <form class="add" method="post" action="/servers">
           <label>Sunucu adı *</label><input name="name" required placeholder="prod-db">
@@ -430,14 +495,17 @@ async def index(request: Request, error: str = ""):
               <label>SSH key yolu</label><input name="ssh_key_path" placeholder="boşsa kullanıcının .ssh klasörü">
             </div>
           </fieldset>
+          <label>Bağlantıyı test etmeden kaydet</label><input name="skip_check" type="checkbox">
           <span></span><button type="submit">Kaydet</button>
         </form>
         <br><a href="/logout">Çıkış Yap</a>
     """
 
 def _redirect_error(message: str) -> RedirectResponse:
-    from urllib.parse import quote
-    return RedirectResponse(url=f"/?error={quote(message)}", status_code=303)
+    return RedirectResponse(url="/?" + urlencode({"error": message}), status_code=303)
+
+def _redirect_info(message: str) -> RedirectResponse:
+    return RedirectResponse(url="/?" + urlencode({"info": message}), status_code=303)
 
 @app.post("/servers")
 async def save_server(request: Request):
@@ -481,9 +549,39 @@ async def save_server(request: Request):
         else:
             return _redirect_error("Cockpit kullanıcısı için şifre gerekli.")
 
+    if form.get("skip_check"):
+        cfg["last_check"] = existing.get("last_check") if existing.get("host") == host else None
+        if cfg["last_check"] is None:
+            cfg.pop("last_check")
+        servers[name] = cfg
+        save_servers(servers)
+        return _redirect_info(f"'{name}' bağlantı testi yapılmadan kaydedildi.")
+
+    check = await check_server(cfg)
+    if not check["ok"]:
+        return _redirect_error(f"'{name}' kaydedilmedi, bağlantı kurulamadı: {check['message']}")
+    cfg["last_check"] = check
+    # Kontrol sürerken dosya değişmiş olabilir; en güncel hâli üzerine yaz
+    servers = load_servers()
     servers[name] = cfg
     save_servers(servers)
-    return RedirectResponse(url="/", status_code=303)
+    return _redirect_info(f"'{name}' kaydedildi. {check['message']}")
+
+@app.post("/servers/{name}/test")
+async def test_server(name: str, request: Request):
+    if not current_user(request):
+        return HTMLResponse("Yetkiniz yok", status_code=403)
+    cfg = load_servers().get(name)
+    if cfg is None:
+        return _redirect_error(f"'{name}' bulunamadı.")
+    check = await check_server(cfg)
+    servers = load_servers()
+    if name in servers:
+        servers[name]["last_check"] = check
+        save_servers(servers)
+    if check["ok"]:
+        return _redirect_info(f"'{name}': {check['message']}")
+    return _redirect_error(f"'{name}': {check['message']}")
 
 @app.post("/servers/{name}/delete")
 async def delete_server(name: str, request: Request):

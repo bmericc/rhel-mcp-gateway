@@ -59,6 +59,12 @@ def login_as(client, username):
 @pytest.fixture
 def admin_client(monkeypatch, servers_file):
     monkeypatch.setattr(main.authenticator, "allowed_users", {"admin"})
+
+    async def always_ok(cfg):
+        return {"ok": True, "via": "cockpit", "message": "Cockpit bağlantısı başarılı.", "at": "2026-10-07 10:00:00"}
+
+    # Bu testler form/kayıt mantığını sınar; gerçek bağlantı denemesi test_server_check.py'de
+    monkeypatch.setattr(main, "check_server", always_ok)
     client = TestClient(main.app)
     login_as(client, "admin")
     return client
