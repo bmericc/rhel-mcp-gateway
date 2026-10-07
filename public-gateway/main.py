@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 import auth
 import cockpit_client
+import outbound_proxy
 import fleet_tools
 
 # MCP Kütüphaneleri
@@ -89,7 +90,7 @@ def save_servers(servers: Dict[str, Dict[str, Any]]):
 
 # --- Gizli bilgiler ---
 # Cockpit şifreleri servers.json'da SECRET_KEY'den türetilen anahtarla şifreli tutulur
-SECRET_FIELDS = ("cockpit_password",)
+SECRET_FIELDS = ("cockpit_password", "proxy")
 
 def _fernet() -> Fernet:
     return Fernet(base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest()))
@@ -109,7 +110,30 @@ def public_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out["cockpit"] = bool(cfg.get("cockpit_user"))
     if out["cockpit"]:
         out["cockpit_url"] = cockpit_url(cfg)
+    out["connection"] = proxy_label(cfg)
     return out
+
+# --- Giden bağlantılar için proxy ---
+# Sunuculara (Cockpit ve SSH) bu proxy üzerinden bağlanılır; sunucular gateway yerine proxy'nin
+# IP adresini görür. Sunucu bazında farklı bir proxy ya da "direct" (proxysiz) seçilebilir.
+OUTBOUND_PROXY = os.getenv("OUTBOUND_PROXY", "").strip()
+
+def server_proxy(cfg: Dict[str, Any]) -> str | None:
+    """Sunucuya bağlanırken kullanılacak proxy adresi (None = doğrudan)."""
+    stored = decrypt_secret(cfg["proxy"]) if cfg.get("proxy") else None
+    if stored == "direct":
+        return None
+    return stored or OUTBOUND_PROXY or None
+
+def proxy_label(cfg: Dict[str, Any]) -> str:
+    stored = decrypt_secret(cfg["proxy"]) if cfg.get("proxy") else None
+    if stored == "direct":
+        return "doğrudan"
+    if stored:
+        return f"proxy {outbound_proxy.redact(stored)}"
+    if OUTBOUND_PROXY:
+        return f"proxy {outbound_proxy.redact(OUTBOUND_PROXY)} (varsayılan)"
+    return "doğrudan"
 
 def cockpit_url(cfg: Dict[str, Any]) -> str:
     return cfg.get("cockpit_url") or f"https://{cfg['host']}:9090"
@@ -228,9 +252,14 @@ async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_
     if not candidates:
         raise SSHError(f"Hata: '{cfg.get('name', cfg.get('host'))}' için kullanılabilir SSH key bulunamadı.")
 
+    proxy = server_proxy(cfg)
     denied = []
     for user, keys in candidates:
         try:
+            extra = {}
+            if proxy:
+                # Proxy tüneli üzerinden açılmış soket asyncssh'e verilir
+                extra["sock"] = await outbound_proxy.open_tunnel(proxy, cfg["host"], cfg.get("port", 22), connect_timeout)
             cm = asyncssh.connect(
                 cfg["host"],
                 port=cfg.get("port", 22),
@@ -239,6 +268,7 @@ async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_
                 known_hosts=None,
                 # asyncssh'de varsayılan olarak bağlantı için zaman aşımı yok; takılan sunucu beklenmesin
                 connect_timeout=connect_timeout,
+                **extra,
             )
             conn = await cm.__aenter__()
         except asyncssh.PermissionDenied as e:
@@ -294,7 +324,7 @@ async def open_runner(cfg: Dict[str, Any]):
         else:
             candidate = cockpit_client.CockpitSession(
                 cockpit_url(cfg), cfg["cockpit_user"], password,
-                verify_tls=bool(cfg.get("cockpit_verify_tls")),
+                verify_tls=bool(cfg.get("cockpit_verify_tls")), proxy=server_proxy(cfg),
             )
             try:
                 session = await candidate.connect()
@@ -484,26 +514,37 @@ PUBLIC_IP_SERVICES = {
     "ipv6": ["https://api6.ipify.org", "https://ipv6.icanhazip.com"],
 }
 PUBLIC_IP_CACHE_TTL = 600
-_public_ip_cache: Dict[str, Any] = {"at": 0.0, "value": None}
+# Anahtar: proxy adresi ("" = doğrudan); değer: {"at": zaman, "value": {...}}
+_public_ip_cache: Dict[str, Dict[str, Any]] = {}
 
-async def _fetch_ip(url: str) -> str | None:
+async def _fetch_ip(url: str, proxy: str | None = None) -> str | None:
     try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            resp = await client.get(url)
-        value = resp.text.strip()
+        if proxy:
+            status, _, body = await outbound_proxy.http_get(proxy, url, timeout=5)
+            if status != 200:
+                return None
+            value = body.decode(errors="replace").strip()
+        else:
+            async with httpx.AsyncClient(timeout=3) as client:
+                resp = await client.get(url)
+            value = resp.text.strip()
         ipaddress.ip_address(value)
         return value
     except Exception:
         return None
 
-async def public_ips(force: bool = False) -> Dict[str, str | None]:
-    """{"ipv4": ..., "ipv6": ...}; belirlenemeyenler None. Sonuç 10 dakika önbelleklenir."""
-    if not force and _public_ip_cache["value"] and time.time() - _public_ip_cache["at"] < PUBLIC_IP_CACHE_TTL:
-        return _public_ip_cache["value"]
+async def public_ips(force: bool = False, proxy: str | None = None) -> Dict[str, str | None]:
+    """{"ipv4": ..., "ipv6": ...}; belirlenemeyenler None. Sonuç 10 dakika önbelleklenir.
+
+    proxy verilirse adres o proxy üzerinden sorgulanır (sunucuların göreceği adres).
+    """
+    cached = _public_ip_cache.get(proxy or "")
+    if not force and cached and time.time() - cached["at"] < PUBLIC_IP_CACHE_TTL:
+        return cached["value"]
 
     async def first(urls):
         for url in urls:
-            ip = await _fetch_ip(url)
+            ip = await _fetch_ip(url, proxy)
             if ip:
                 return ip
         return None
@@ -512,14 +553,22 @@ async def public_ips(force: bool = False) -> Dict[str, str | None]:
     value = {"ipv4": v4, "ipv6": v6}
     # Hiçbiri bulunamadıysa önbelleğe alma; sonraki sayfa açılışında tekrar denensin
     if v4 or v6:
-        _public_ip_cache.update(at=time.time(), value=value)
+        _public_ip_cache[proxy or ""] = {"at": time.time(), "value": value}
     return value
 
-def public_ip_html(ips: Dict[str, str | None]) -> str:
+def public_ip_html(ips: Dict[str, str | None], proxy_ips: Dict[str, str | None] | None = None) -> str:
+    """proxy_ips: varsayılan proxy (OUTBOUND_PROXY) tanımlıysa onun üzerinden görünen adres."""
+    proxy_html = ""
+    if OUTBOUND_PROXY:
+        via = [ip for ip in ((proxy_ips or {}).get("ipv4"), (proxy_ips or {}).get("ipv6")) if ip]
+        shown = " ".join(f"<code>{html.escape(ip)}</code>" for ip in via) or "<span class='err'>belirlenemedi</span>"
+        proxy_html = (f"<p>Varsayılan proxy ({html.escape(outbound_proxy.redact(OUTBOUND_PROXY))}) çıkış IP adresi: "
+                      f"{shown}<br><span class='note'>Proxy kullanan sunucular bu adresi görür; "
+                      f"onlarda bu adrese izin verin.</span></p>")
     found = [ip for ip in (ips.get("ipv4"), ips.get("ipv6")) if ip]
     if not found:
-        return ("<p class='note'>Gateway'in dış IP adresi belirlenemedi "
-                "(dışarıya erişim kapalı olabilir).</p>")
+        return proxy_html + ("<p class='note'>Gateway'in dış IP adresi belirlenemedi "
+                             "(dışarıya erişim kapalı olabilir).</p>")
     codes = " ".join(f"<code>{html.escape(ip)}</code>" for ip in found)
     v4 = ips.get("ipv4")
     example = ""
@@ -527,7 +576,7 @@ def public_ip_html(ips: Dict[str, str | None]) -> str:
         rule = (f"firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" source address=\"{v4}\" "
                 f"port port=\"9090\" protocol=\"tcp\" accept' && firewall-cmd --reload")
         example = f"<br>Örnek (RHEL, firewalld): <code>{html.escape(rule)}</code>"
-    return (
+    return proxy_html + (
         f"<p>Gateway dış IP adresi: {codes} "
         f"<form method='post' action='/public-ip/refresh' style='display:inline'><button>Yenile</button></form><br>"
         f"<span class='note'>Uzaktaki sunucularda bu adrese Cockpit (9090/tcp) ve SSH yedeği için 22/tcp izni verin. "
@@ -561,6 +610,7 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
             session = cockpit_client.CockpitSession(
                 cockpit_url(cfg), cfg["cockpit_user"], password,
                 verify_tls=bool(cfg.get("cockpit_verify_tls")), connect_timeout=CHECK_TIMEOUT,
+                proxy=server_proxy(cfg),
             )
             try:
                 await session.connect()
@@ -596,7 +646,7 @@ def server_row(cfg: Dict[str, Any]) -> str:
         status = "<span class='note'>Test edilmedi</span>"
     quoted = html.escape(name)
     return (
-        f"<tr><td><b>{e(name)}</b></td><td>{cockpit}</td><td>{ssh}</td><td>{status}</td>"
+        f"<tr><td><b>{e(name)}</b><br><span class='note'>{e(proxy_label(cfg))}</span></td><td>{cockpit}</td><td>{ssh}</td><td>{status}</td>"
         f"<td><form method='post' action='/servers/{quoted}/test'><button>Test et</button></form> "
         f"<form method='post' action='/servers/{quoted}/delete' "
         f"onsubmit=\"return confirm('{quoted} silinsin mi?')\"><button>Sil</button></form></td></tr>"
@@ -618,7 +668,7 @@ async def index(request: Request, error: str = "", info: str = ""):
     return render_page("Sunucular", f"""
         <h2>Hoş geldiniz, {html.escape(username)}!</h2>
         <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
-        {public_ip_html(await public_ips())}
+        {public_ip_html(await public_ips(), await public_ips(proxy=OUTBOUND_PROXY) if OUTBOUND_PROXY else None)}
         <h3>Kayıtlı Sunucular</h3>
         {info_html}
         <table>
@@ -649,6 +699,17 @@ async def index(request: Request, error: str = "", info: str = ""):
               <label>SSH portu</label><input name="port" type="number" value="22">
               <label>SSH key yolu</label><input name="ssh_key_path" placeholder="boşsa kullanıcının .ssh klasörü">
             </div>
+          </fieldset>
+          <fieldset style="grid-column: 1 / -1">
+            <legend>Bağlantı proxy'si</legend>
+            <div class="add">
+              <label>Proxy</label><input name="proxy" autocomplete="off"
+                placeholder="socks5://host:1080 · http://host:3128 · direct · default">
+            </div>
+            <p class="note">Cockpit ve SSH bağlantıları bu proxy üzerinden yapılır; sunucu proxy'nin IP adresini görür.
+            Boş bırakılırsa mevcut ayar korunur (yeni sunucuda varsayılan kullanılır).
+            <code>default</code>: varsayılan (.env'deki OUTBOUND_PROXY{'' if not OUTBOUND_PROXY else ' = ' + html.escape(outbound_proxy.redact(OUTBOUND_PROXY))}),
+            <code>direct</code>: proxysiz. Kullanıcı adı/parola adreste verilebilir (socks5://kullanici:parola@host:1080) ve şifreli saklanır.</p>
           </fieldset>
           <label>Bağlantıyı test etmeden kaydet</label><input name="skip_check" type="checkbox">
           <span></span><button type="submit">Kaydet</button>
@@ -715,6 +776,19 @@ async def save_server(request: Request):
     if form.get("cockpit_verify_tls"):
         cfg["cockpit_verify_tls"] = True
 
+    proxy_value = field("proxy")
+    if proxy_value == "":
+        if existing.get("proxy"):
+            cfg["proxy"] = existing["proxy"]
+    elif proxy_value == "direct":
+        cfg["proxy"] = encrypt_secret("direct")
+    elif proxy_value != "default":
+        try:
+            outbound_proxy.parse_proxy(proxy_value)
+        except ValueError as e:
+            return _redirect_error(f"Geçersiz proxy: {e}")
+        cfg["proxy"] = encrypt_secret(proxy_value)
+
     if cfg.get("cockpit_user"):
         password = form.get("cockpit_password") or ""
         if password:
@@ -745,6 +819,8 @@ async def refresh_public_ip(request: Request):
     if not current_user(request):
         return forbidden()
     ips = await public_ips(force=True)
+    if OUTBOUND_PROXY:
+        await public_ips(force=True, proxy=OUTBOUND_PROXY)
     found = ", ".join(ip for ip in ips.values() if ip)
     if found:
         return _redirect_info(f"Dış IP adresi: {found}")

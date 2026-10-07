@@ -11,7 +11,7 @@ import main
 
 @pytest.fixture(autouse=True)
 def clear_cache(monkeypatch):
-    monkeypatch.setattr(main, "_public_ip_cache", {"at": 0.0, "value": None})
+    monkeypatch.setattr(main, "_public_ip_cache", {})
 
 
 @pytest.fixture
@@ -20,9 +20,9 @@ def fake_lookup(monkeypatch):
     answers = {"https://api.ipify.org": "203.0.113.7", "https://api6.ipify.org": None,
                "https://ipv4.icanhazip.com": None, "https://ipv6.icanhazip.com": None}
 
-    async def fetch(url):
-        calls.append(url)
-        return answers.get(url)
+    async def fetch(url, proxy=None):
+        calls.append((url, proxy))
+        return answers.get(url) if proxy is None else answers.get(("proxy", url))
 
     monkeypatch.setattr(main, "_fetch_ip", fetch)
     return calls, answers
