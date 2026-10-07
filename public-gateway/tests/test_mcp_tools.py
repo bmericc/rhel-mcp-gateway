@@ -71,7 +71,7 @@ async def test_run_remote_command_requires_confirm(servers_file, sample_server, 
     calls, _ = fake_ssh
     result = await call("run_remote_command", {"server_name": "prod-db", "command": "rm -rf /tmp/x"})
     text = result.content[0].text
-    assert "Onay gerekli" in text
+    assert "Confirmation required" in text
     assert "rm -rf /tmp/x" in text
     assert calls == []
 
@@ -85,13 +85,13 @@ async def test_list_servers_empty(servers_file):
 async def test_list_servers_returns_saved(servers_file, sample_server):
     servers_file(sample_server)
     result = await call("list_servers", {})
-    assert json.loads(result.content[0].text) == {"prod-db": {**sample_server["prod-db"], "cockpit": False, "connection": "doğrudan"}}
+    assert json.loads(result.content[0].text) == {"prod-db": {**sample_server["prod-db"], "cockpit": False, "connection": "direct"}}
 
 
 async def test_run_remote_command_unknown_server(servers_file, fake_ssh):
     calls, _ = fake_ssh
     result = await call("run_remote_command", {"confirm": True, "server_name": "yok", "command": "uptime"})
-    assert "'yok' sunucusu hafızada bulunamadı" in result.content[0].text
+    assert "server 'yok' not found" in result.content[0].text
     assert calls == []
 
 
@@ -136,13 +136,13 @@ async def test_run_remote_command_ssh_error(servers_file, sample_server, fake_ss
     _, state = fake_ssh
     state["error"] = OSError("Connection refused")
     result = await call("run_remote_command", {"confirm": True, "server_name": "prod-db", "command": "uptime"})
-    assert "SSH Bağlantı Hatası: Connection refused" in result.content[0].text
+    assert "SSH connection error: Connection refused" in result.content[0].text
 
 
 async def test_unknown_tool_returns_error():
     result = await call("olmayan_arac", {})
     assert result.isError
-    assert "Bilinmeyen araç: olmayan_arac" in result.content[0].text
+    assert "Unknown tool: olmayan_arac" in result.content[0].text
 
 
 def connected_users(calls):
@@ -199,7 +199,7 @@ async def test_all_users_denied(servers_file, sample_server, fake_ssh, ssh_dirs)
 
     assert connected_users(calls) == ["admin", "root", "bmericc"]
     text = result.content[0].text
-    assert "SSH Kimlik Doğrulama Hatası" in text
+    assert "SSH authentication failed" in text
     assert "root: Permission denied" in text
     assert "bmericc: Permission denied" in text
 
@@ -221,5 +221,5 @@ async def test_no_keys_available(servers_file, fake_ssh):
 
     result = await call("run_remote_command", {"confirm": True, "server_name": "web", "command": "uptime"})
 
-    assert "kullanılabilir SSH key bulunamadı" in result.content[0].text
+    assert "no usable SSH key found" in result.content[0].text
     assert calls == []

@@ -48,14 +48,14 @@ def test_paste_duplicate_name_rejected(client):
     before = main.load_shared_keys()["ortak"]["fingerprint"]
     resp = client.post("/ssh-keys", data={"name": "ortak", "private_key": new_key().export_private_key().decode()},
                        follow_redirects=False)
-    assert "zaten var" in client.get(resp.headers["location"]).text
+    assert "already exists" in client.get(resp.headers["location"]).text
     assert main.load_shared_keys()["ortak"]["fingerprint"] == before
 
 
 def test_generate_duplicate_name_rejected(client):
     client.post("/ssh-keys/generate", data={"name": "ortak"})
     resp = client.post("/ssh-keys/generate", data={"name": "ortak"}, follow_redirects=False)
-    assert "zaten var" in client.get(resp.headers["location"]).text
+    assert "already exists" in client.get(resp.headers["location"]).text
 
 
 def test_add_pasted_key(client):
@@ -71,11 +71,11 @@ def test_add_passphrase_key(client):
     encrypted = key.export_private_key(passphrase=PASSWORD).decode()
 
     resp = client.post("/ssh-keys", data={"name": "parolali", "private_key": encrypted}, follow_redirects=False)
-    assert "parolalı" in client.get(resp.headers["location"]).text
+    assert "passphrase-protected" in client.get(resp.headers["location"]).text
 
     resp = client.post("/ssh-keys", data={"name": "parolali", "private_key": encrypted, "passphrase": "yanlis-xxx"},
                        follow_redirects=False)
-    assert "parolası hatalı" in client.get(resp.headers["location"]).text
+    assert "Wrong key passphrase" in client.get(resp.headers["location"]).text
 
     client.post("/ssh-keys", data={"name": "parolali", "private_key": encrypted, "passphrase": PASSWORD})
     # Kullanımda parola tekrar sorulmasın diye parolasız hâli (gateway anahtarıyla şifreli) saklanır
@@ -86,7 +86,7 @@ def test_add_passphrase_key(client):
 def test_add_invalid_key(client, private_key):
     text = new_key().export_public_key().decode() if private_key is None else private_key
     resp = client.post("/ssh-keys", data={"name": "kotu", "private_key": text}, follow_redirects=False)
-    assert "Geçerli bir SSH özel anahtarı değil" in client.get(resp.headers["location"]).text
+    assert "Not a valid SSH private key" in client.get(resp.headers["location"]).text
     assert main.load_shared_keys() == {}
 
 
@@ -145,8 +145,8 @@ def page_title(text):
 
 
 def test_titles(client):
-    assert page_title(client.get("/").text) == "Sunucular · RHEL MCP Gateway"
+    assert page_title(client.get("/").text) == "Servers · RHEL MCP Gateway"
     anon = TestClient(main.app)
-    assert page_title(anon.get("/login").text) == "RHEL MCP Gateway - Giriş · RHEL MCP Gateway"
-    assert page_title(anon.post("/servers", data={}).text) == "Yetkiniz yok · RHEL MCP Gateway"
-    assert page_title(anon.get("/oauth/login", params={"request": "yok"}).text) == "Giriş isteği geçersiz · RHEL MCP Gateway"
+    assert page_title(anon.get("/login").text) == "RHEL MCP Gateway - Login · RHEL MCP Gateway"
+    assert page_title(anon.post("/servers", data={}).text) == "Access denied · RHEL MCP Gateway"
+    assert page_title(anon.get("/oauth/login", params={"request": "yok"}).text) == "Invalid login request · RHEL MCP Gateway"

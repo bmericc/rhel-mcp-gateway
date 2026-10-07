@@ -42,7 +42,7 @@ def test_read_filters_and_paging(audit_file):
 def test_long_values_are_clipped(audit_file):
     audit_log.record("mcp", "read_logs", result="x" * 10000, args={"command": "y" * 10000})
     entry = audit_file()[0]
-    assert len(entry["result"]) < 4100 and "kırpıldı" in entry["result"]
+    assert len(entry["result"]) < 4100 and "truncated" in entry["result"]
     assert len(entry["args"]["command"]) < 4100
 
 
@@ -105,10 +105,10 @@ async def test_failed_calls_are_logged_as_error(servers_file, sample_server, fak
 
     by_action = audit_file()
     assert [e["status"] for e in by_action] == ["error"] * 4
-    assert "Bilinmeyen araç" in by_action[0]["result"]
+    assert "Unknown tool" in by_action[0]["result"]
     assert "Connection refused" in by_action[1]["result"]
-    assert "bulunamadı" in by_action[2]["result"]
-    assert "Geçersiz servis adı" in by_action[3]["result"]
+    assert "not found" in by_action[2]["result"]
+    assert "Invalid service name" in by_action[3]["result"]
 
 
 @pytest.mark.anyio
@@ -172,7 +172,7 @@ def test_logs_page_shows_and_filters_entries(admin_client):  # noqa: F811
     assert "run_remote_command" in page and "baskasi" in page
     # Kayıt içeriği HTML olarak yorumlanmaz
     assert "<b>merhaba</b>" not in page and "&lt;b&gt;merhaba&lt;/b&gt;" in page
-    assert "[cockpit · root · root · çıkış 0]" in page
+    assert "[cockpit · root · root · exit 0]" in page
 
     filtered = admin_client.get("/logs", params={"status": "error"}).text
     assert "baskasi" in filtered and "run_remote_command" not in filtered

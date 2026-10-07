@@ -26,6 +26,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 import cockpit_client
+from i18n import t
 
 ACCESS_TOKEN_TTL = 3600
 REFRESH_TOKEN_TTL = 30 * 24 * 3600
@@ -54,15 +55,15 @@ class CockpitAuthenticator:
     async def login(self, username: str, password: str) -> str | None:
         """Başarılıysa None, değilse kullanıcıya gösterilecek hata mesajını döner."""
         if not username or not password:
-            return "Kullanıcı adı ve şifre gerekli."
+            return t("Username and password are required.")
         try:
             await cockpit_client.check_login(self.url, username, password, verify_tls=self.verify_tls)
         except cockpit_client.CockpitAuthError:
-            return "Kullanıcı adı veya şifre hatalı."
+            return t("Wrong username or password.")
         except cockpit_client.CockpitError:
-            return "Cockpit'e ulaşılamadı, giriş doğrulanamadı."
+            return t("Could not reach Cockpit; the login could not be verified.")
         if not self.is_allowed(username):
-            return "Bu kullanıcının gateway'e erişim yetkisi yok."
+            return t("This user is not allowed to access the gateway.")
         return None
 
     async def check_basic(self, header_value: str) -> str | None:

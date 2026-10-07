@@ -18,6 +18,8 @@ import ssl
 import struct
 from urllib.parse import unquote, urlsplit
 
+from i18n import N, t
+
 SCHEMES = ("http", "socks5", "socks5h")
 MAX_RESPONSE = 64 * 1024
 
@@ -29,11 +31,11 @@ class ProxyError(Exception):
 def parse_proxy(url: str) -> dict:
     parts = urlsplit(url.strip())
     if parts.scheme not in SCHEMES:
-        raise ValueError("Proxy adresi http://, socks5:// veya socks5h:// ile başlamalı.")
+        raise ValueError(t("The proxy address must start with http://, socks5:// or socks5h://."))
     if not parts.hostname or not parts.port:
-        raise ValueError("Proxy adresinde host ve port olmalı (örn. socks5://10.0.0.1:1080).")
+        raise ValueError(t("The proxy address needs a host and a port (e.g. socks5://10.0.0.1:1080)."))
     if parts.path not in ("", "/") or parts.query or parts.fragment:
-        raise ValueError("Proxy adresi yalnızca şema, host ve porttan oluşmalı.")
+        raise ValueError(t("The proxy address may only consist of a scheme, host and port."))
     return {
         "scheme": parts.scheme,
         "host": parts.hostname,
@@ -48,7 +50,7 @@ def redact(url: str) -> str:
     try:
         p = parse_proxy(url)
     except ValueError:
-        return "geçersiz proxy"
+        return t("invalid proxy")
     user = f"{p['username']}:***@" if p["username"] else ""
     return f"{p['scheme']}://{user}{p['host']}:{p['port']}"
 
@@ -58,7 +60,7 @@ async def _recv_exact(loop, sock, n: int) -> bytes:
     while len(data) < n:
         chunk = await loop.sock_recv(sock, n - len(data))
         if not chunk:
-            raise ProxyError("Proxy bağlantıyı kapattı.")
+            raise ProxyError(t("The proxy closed the connection."))
         data += chunk
     return data
 
@@ -76,19 +78,19 @@ async def _http_connect(loop, sock, p: dict, host: str, port: int):
     while not response.endswith(b"\r\n\r\n"):
         chunk = await loop.sock_recv(sock, 1)
         if not chunk:
-            raise ProxyError("HTTP proxy bağlantıyı kapattı.")
+            raise ProxyError(t("The HTTP proxy closed the connection."))
         response += chunk
         if len(response) > MAX_RESPONSE:
-            raise ProxyError("HTTP proxy yanıtı çok uzun.")
+            raise ProxyError(t("The HTTP proxy response is too long."))
     status_line = response.split(b"\r\n", 1)[0].decode(errors="replace")
     parts = status_line.split(" ", 2)
     if len(parts) < 2 or parts[1] != "200":
-        raise ProxyError(f"HTTP proxy bağlantıyı reddetti: {status_line}")
+        raise ProxyError(t("The HTTP proxy refused the connection: {status}", status=status_line))
 
 
 SOCKS5_ERRORS = {
-    1: "genel hata", 2: "kurallar izin vermiyor", 3: "ağa ulaşılamıyor", 4: "hosta ulaşılamıyor",
-    5: "bağlantı reddedildi", 6: "TTL aşıldı", 7: "komut desteklenmiyor", 8: "adres türü desteklenmiyor",
+    1: N("general failure"), 2: N("not allowed by the ruleset"), 3: N("network unreachable"), 4: N("host unreachable"),
+    5: N("connection refused"), 6: N("TTL expired"), 7: N("command not supported"), 8: N("address type not supported"),
 }
 
 
@@ -97,14 +99,14 @@ async def _socks5_connect(loop, sock, p: dict, host: str, port: int):
     await loop.sock_sendall(sock, b"\x05" + bytes([len(methods)]) + methods)
     version, method = await _recv_exact(loop, sock, 2)
     if version != 5 or method == 0xFF:
-        raise ProxyError("SOCKS5 proxy kimlik doğrulama yöntemini kabul etmedi.")
+        raise ProxyError(t("The SOCKS5 proxy did not accept the authentication method."))
     if method == 2:
         user = (p["username"] or "").encode()
         password = (p["password"] or "").encode()
         await loop.sock_sendall(sock, b"\x01" + bytes([len(user)]) + user + bytes([len(password)]) + password)
         _, status = await _recv_exact(loop, sock, 2)
         if status != 0:
-            raise ProxyError("SOCKS5 proxy kullanıcı adı/parolayı reddetti.")
+            raise ProxyError(t("The SOCKS5 proxy rejected the username/password."))
 
     try:
         ip = ipaddress.ip_address(host)
@@ -125,7 +127,8 @@ async def _socks5_connect(loop, sock, p: dict, host: str, port: int):
 
     version, reply, _, atype = await _recv_exact(loop, sock, 4)
     if version != 5 or reply != 0:
-        raise ProxyError(f"SOCKS5 proxy hedefe bağlanamadı: {SOCKS5_ERRORS.get(reply, reply)}")
+        reason = t(SOCKS5_ERRORS[reply]) if reply in SOCKS5_ERRORS else reply
+        raise ProxyError(t("The SOCKS5 proxy could not connect to the target: {reason}", reason=reason))
     # Bağlanılan adresi oku ve at
     if atype == 1:
         await _recv_exact(loop, sock, 4 + 2)
@@ -135,7 +138,7 @@ async def _socks5_connect(loop, sock, p: dict, host: str, port: int):
         (length,) = await _recv_exact(loop, sock, 1)
         await _recv_exact(loop, sock, length + 2)
     else:
-        raise ProxyError("SOCKS5 proxy beklenmeyen adres türü döndü.")
+        raise ProxyError(t("The SOCKS5 proxy returned an unexpected address type."))
 
 
 async def open_tunnel(proxy_url: str, host: str, port: int, timeout: float = 15) -> socket.socket:
@@ -143,7 +146,7 @@ async def open_tunnel(proxy_url: str, host: str, port: int, timeout: float = 15)
     try:
         p = parse_proxy(proxy_url)
     except ValueError as e:
-        raise ProxyError(f"Geçersiz proxy ayarı: {e}") from e
+        raise ProxyError(t("Invalid proxy setting: {error}", error=e)) from e
     loop = asyncio.get_running_loop()
 
     async def connect():
@@ -167,9 +170,9 @@ async def open_tunnel(proxy_url: str, host: str, port: int, timeout: float = 15)
     except ProxyError:
         raise
     except asyncio.TimeoutError as e:
-        raise ProxyError(f"Proxy bağlantısı zaman aşımına uğradı ({redact(proxy_url)})") from e
+        raise ProxyError(t("The proxy connection timed out ({proxy})", proxy=redact(proxy_url))) from e
     except OSError as e:
-        raise ProxyError(f"Proxy'ye bağlanılamadı ({redact(proxy_url)}): {e}") from e
+        raise ProxyError(t("Could not connect to the proxy ({proxy}): {reason}", proxy=redact(proxy_url), reason=e)) from e
 
 
 def _dechunk(data: bytes) -> bytes:
@@ -224,4 +227,5 @@ async def http_get(proxy_url: str, url: str, headers: dict | None = None, ssl_co
         return await asyncio.wait_for(request(), timeout)
     except (asyncio.TimeoutError, OSError, ValueError, IndexError) as e:
         sock.close()
-        raise ProxyError(f"Proxy üzerinden istek başarısız ({redact(proxy_url)}): {e or type(e).__name__}") from e
+        raise ProxyError(t("Request through the proxy failed ({proxy}): {reason}",
+                           proxy=redact(proxy_url), reason=e or type(e).__name__)) from e

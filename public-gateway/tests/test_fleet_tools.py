@@ -100,7 +100,7 @@ def test_parse_os_release_and_loadavg():
 
 def test_truncate():
     assert fleet_tools.truncate("abc", 5) == "abc"
-    assert fleet_tools.truncate("a" * 10, 5).startswith("aaaaa\n... [çıktı kırpıldı")
+    assert fleet_tools.truncate("a" * 10, 5).startswith("aaaaa\n... [output truncated")
 
 
 # --- Doğrulama ---
@@ -247,7 +247,7 @@ async def test_read_logs_builds_quoted_command(ssh):
 async def test_invalid_input_is_error_and_runs_nothing(ssh):
     result = await call("service_status", {"server_name": "root-box", "service": "nginx; reboot"})
     assert result.isError
-    assert "Geçersiz servis adı" in result.content[0].text
+    assert "Invalid service name" in result.content[0].text
     assert ssh["commands"] == []
 
 
@@ -283,7 +283,7 @@ async def test_available_updates_error(ssh):
 async def test_destructive_tool_without_confirm_only_previews(ssh):
     result = await call("service_action", {"server_name": "root-box", "service": "nginx", "action": "restart"})
     text = result.content[0].text
-    assert "Onay gerekli" in text
+    assert "Confirmation required" in text
     assert "systemctl restart nginx" in text
     assert ssh["connects"] == []
 
@@ -331,7 +331,7 @@ async def test_firewall_rule_skips_reload_on_failure(ssh):
 @pytestmark_anyio
 async def test_unknown_server(ssh):
     result = await call("server_info", {"server_name": "yok"})
-    assert "'yok' sunucusu hafızada bulunamadı" in result.content[0].text
+    assert "server 'yok' not found" in result.content[0].text
 
 
 @pytestmark_anyio
@@ -341,7 +341,7 @@ async def test_command_timeout(ssh, monkeypatch):
     result = await call("run_remote_command", {"server_name": "root-box", "command": "sleep 100", "confirm": True})
     text = result.content[0].text
     assert "Exit Status: None" in text
-    assert "zaman aşımına uğradı" in text
+    assert "timed out" in text
 
 
 @pytestmark_anyio

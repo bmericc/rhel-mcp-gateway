@@ -11,6 +11,8 @@ from typing import Any, Awaitable, Callable, NamedTuple
 
 import mcp.types as types
 
+from i18n import N, t
+
 
 class CommandResult(NamedTuple):
     user: str
@@ -46,41 +48,41 @@ SERVICE_ACTIONS = ["start", "stop", "restart", "reload", "enable", "disable"]
 
 def _check(pattern: re.Pattern, value: Any, label: str) -> str:
     if not isinstance(value, str) or not pattern.match(value) or value.startswith("-"):
-        raise ToolInputError(f"Geçersiz {label}: {value!r}")
+        raise ToolInputError(t("Invalid {label}: {value}", label=t(label), value=repr(value)))
     return value
 
 
 def validate_service(value: Any) -> str:
-    return _check(_SERVICE_RE, value, "servis adı")
+    return _check(_SERVICE_RE, value, N("service name"))
 
 
 def validate_package(value: Any) -> str:
-    return _check(_PACKAGE_RE, value, "paket adı")
+    return _check(_PACKAGE_RE, value, N("package name"))
 
 
 def validate_packages(values: Any) -> list[str]:
     if not isinstance(values, list) or not values:
-        raise ToolInputError("En az bir paket adı verilmeli.")
+        raise ToolInputError(t("At least one package name is required."))
     return [validate_package(v) for v in values]
 
 
 def validate_port(value: Any) -> str:
-    _check(_PORT_RE, value, "port (örn. 8080/tcp)")
+    _check(_PORT_RE, value, N("port (e.g. 8080/tcp)"))
     for part in value.split("/")[0].split("-"):
         if not 1 <= int(part) <= 65535:
-            raise ToolInputError(f"Geçersiz port: {value!r}")
+            raise ToolInputError(t("Invalid port: {value}", value=repr(value)))
     return value
 
 
 def validate_since(value: Any) -> str:
-    return _check(_SINCE_RE, value, "zaman ifadesi")
+    return _check(_SINCE_RE, value, N("time expression"))
 
 
 def clamp_int(value: Any, default: int, low: int, high: int) -> int:
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ToolInputError(f"Sayı bekleniyordu: {value!r}")
+        raise ToolInputError(t("Expected a number: {value}", value=repr(value)))
     return max(low, min(high, value))
 
 
@@ -89,7 +91,7 @@ def clamp_int(value: Any, default: int, low: int, high: int) -> int:
 def truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n... [çıktı kırpıldı, toplam {len(text)} karakter]"
+    return text[:limit] + "\n" + t("... [output truncated, {total} characters total]", total=len(text))
 
 
 def result_dict(r: CommandResult) -> dict:
@@ -224,17 +226,21 @@ class ToolSpec:
     preview: Callable[[dict], str] | None = None
 
     def to_tool(self) -> types.Tool:
-        properties = {"server_name": {"type": "string", "description": "Kayıtlı sunucu adı"}}
-        properties.update(self.properties)
+        # Descriptions are translated per request (see i18n), not at import time
+        properties = {"server_name": {"type": "string", "description": t("Registered server name")}}
+        properties.update({
+            name: {**prop, "description": t(prop["description"])} if "description" in prop else prop
+            for name, prop in self.properties.items()
+        })
         required = ["server_name", *self.required]
         if not self.read_only:
             properties["confirm"] = {
                 "type": "boolean",
-                "description": "İşlemi gerçekten uygulamak için true. Verilmezse sadece ne yapılacağı gösterilir.",
+                "description": t("Set to true to actually apply the change. Otherwise only what would be done is shown."),
             }
         return types.Tool(
             name=self.name,
-            description=self.description,
+            description=t(self.description),
             inputSchema={"type": "object", "properties": properties, "required": required},
             annotations=types.ToolAnnotations(
                 readOnlyHint=self.read_only,
@@ -301,11 +307,11 @@ async def read_logs(run: Runner, args: dict) -> dict:
         argv += ["--since", validate_since(args["since"])]
     if args.get("priority"):
         if args["priority"] not in LOG_PRIORITIES:
-            raise ToolInputError(f"Geçersiz öncelik: {args['priority']!r}")
+            raise ToolInputError(t("Invalid priority: {value}", value=repr(args["priority"])))
         argv += ["-p", args["priority"]]
     if args.get("grep"):
         if not isinstance(args["grep"], str) or len(args["grep"]) > 200:
-            raise ToolInputError("grep ifadesi en fazla 200 karakter olabilir.")
+            raise ToolInputError(t("The grep expression may be at most 200 characters."))
         argv += ["-g", args["grep"]]
     return result_dict(await run(argv, privileged=True))
 
@@ -313,7 +319,7 @@ async def read_logs(run: Runner, args: dict) -> dict:
 async def top_processes(run: Runner, args: dict) -> dict:
     sort_by = args.get("sort_by", "cpu")
     if sort_by not in ("cpu", "mem"):
-        raise ToolInputError(f"Geçersiz sıralama: {sort_by!r}")
+        raise ToolInputError(t("Invalid sort order: {value}", value=repr(sort_by)))
     limit = clamp_int(args.get("limit"), 10, 1, 50)
     key = "-pcpu" if sort_by == "cpu" else "-pmem"
     r = await run(["ps", "-eo", "pid,user,pcpu,pmem,rss,args", f"--sort={key}", "--no-headers"])
@@ -346,7 +352,7 @@ async def selinux_status(run: Runner, args: dict) -> dict:
     text = denials.stdout if denials.exit_status == 0 else ""
     return {
         "mode": mode.stdout.strip(),
-        "recent_denials": truncate(text) or "Son 10 dakikada SELinux engellemesi yok.",
+        "recent_denials": truncate(text) or t("No SELinux denials in the last 10 minutes."),
     }
 
 
@@ -381,7 +387,7 @@ async def service_action(run: Runner, args: dict) -> dict:
     service = validate_service(args.get("service"))
     action = args.get("action")
     if action not in SERVICE_ACTIONS:
-        raise ToolInputError(f"Geçersiz işlem: {action!r}")
+        raise ToolInputError(t("Invalid action: {value}", value=repr(action)))
     r = await run(["systemctl", action, service], privileged=True)
     active = await run(["systemctl", "is-active", service])
     out = result_dict(r)
@@ -409,12 +415,12 @@ async def package_remove(run: Runner, args: dict) -> dict:
 def _firewall_target(args: dict) -> str:
     port, service = args.get("port"), args.get("service")
     if bool(port) == bool(service):
-        raise ToolInputError("port veya service parametrelerinden yalnızca biri verilmeli.")
+        raise ToolInputError(t("Exactly one of the port or service parameters must be given."))
     if args.get("action") not in ("add", "remove"):
-        raise ToolInputError(f"Geçersiz işlem: {args.get('action')!r}")
+        raise ToolInputError(t("Invalid action: {value}", value=repr(args.get("action"))))
     if port:
         return f"--{args['action']}-port={validate_port(port)}"
-    return f"--{args['action']}-service={_check(_FW_SERVICE_RE, service, 'firewalld servis adı')}"
+    return f"--{args['action']}-service={_check(_FW_SERVICE_RE, service, N('firewalld service name'))}"
 
 
 async def firewall_rule(run: Runner, args: dict) -> dict:
@@ -431,7 +437,7 @@ async def firewall_rule(run: Runner, args: dict) -> dict:
 async def reboot_server(run: Runner, args: dict) -> dict:
     r = await run(["systemctl", "reboot"], privileged=True)
     out = result_dict(r)
-    out["note"] = "Yeniden başlatma komutu gönderildi; bağlantının kopması beklenir."
+    out["note"] = t("Reboot command sent; the connection is expected to drop.")
     return out
 
 
@@ -443,78 +449,78 @@ def _names(args: dict) -> str:
 TOOLS: list[ToolSpec] = [
     ToolSpec(
         "server_info",
-        "Sunucunun hostname, işletim sistemi sürümü, kernel ve uptime bilgisini döndürür.",
+        "Returns the server's hostname, operating system version, kernel and uptime.",
         {}, server_info,
     ),
     ToolSpec(
         "resource_usage",
-        "Bellek, swap, sistem yükü, CPU sayısı ve disk doluluk oranlarını döndürür.",
+        "Returns memory, swap, system load, CPU count and disk usage.",
         {}, resource_usage,
     ),
     ToolSpec(
         "service_status",
-        "Bir systemd servisinin aktif/etkin durumunu ve son log satırlarını döndürür.",
-        {"service": {"type": "string", "description": "Servis adı (örn. nginx, httpd.service)"}},
+        "Returns the active/enabled state of a systemd service and its latest log lines.",
+        {"service": {"type": "string", "description": "Service name (e.g. nginx, httpd.service)"}},
         service_status, required=["service"],
     ),
     ToolSpec(
         "failed_services",
-        "Çökmüş (failed) systemd unit'lerini listeler.",
+        "Lists failed systemd units.",
         {}, failed_services,
     ),
     ToolSpec(
         "read_logs",
-        "journalctl ile filtreli log okur.",
+        "Reads filtered logs with journalctl.",
         {
-            "unit": {"type": "string", "description": "Sadece bu servisin logları"},
-            "since": {"type": "string", "description": "Başlangıç zamanı (örn. '1 hour ago', 'today', '2026-10-06 10:00')"},
-            "priority": {"type": "string", "enum": LOG_PRIORITIES, "description": "Bu öncelik ve daha ciddi olanlar"},
-            "grep": {"type": "string", "description": "Mesajda aranacak ifade (regex)"},
-            "lines": {"type": "integer", "description": "En fazla satır sayısı (varsayılan 100, en çok 1000)"},
+            "unit": {"type": "string", "description": "Only logs of this service"},
+            "since": {"type": "string", "description": "Start time (e.g. '1 hour ago', 'today', '2026-10-06 10:00')"},
+            "priority": {"type": "string", "enum": LOG_PRIORITIES, "description": "This priority and more severe ones"},
+            "grep": {"type": "string", "description": "Expression to search for in the message (regex)"},
+            "lines": {"type": "integer", "description": "Maximum number of lines (default 100, max 1000)"},
         },
         read_logs,
     ),
     ToolSpec(
         "top_processes",
-        "En çok CPU veya bellek kullanan süreçleri listeler.",
+        "Lists the processes using the most CPU or memory.",
         {
-            "sort_by": {"type": "string", "enum": ["cpu", "mem"], "description": "Sıralama ölçütü (varsayılan cpu)"},
-            "limit": {"type": "integer", "description": "Süreç sayısı (varsayılan 10, en çok 50)"},
+            "sort_by": {"type": "string", "enum": ["cpu", "mem"], "description": "Sort criterion (default cpu)"},
+            "limit": {"type": "integer", "description": "Number of processes (default 10, max 50)"},
         },
         top_processes,
     ),
     ToolSpec(
         "network_info",
-        "IP adreslerini, yönlendirme tablosunu ve dinlenen portları döndürür.",
+        "Returns IP addresses, the routing table and listening ports.",
         {}, network_info,
     ),
     ToolSpec(
         "firewall_status",
-        "firewalld durumunu ve aktif kuralları döndürür.",
+        "Returns the firewalld state and active rules.",
         {}, firewall_status,
     ),
     ToolSpec(
         "selinux_status",
-        "SELinux modunu ve son SELinux (AVC) engellemelerini döndürür.",
+        "Returns the SELinux mode and recent SELinux (AVC) denials.",
         {}, selinux_status,
     ),
     ToolSpec(
         "available_updates",
-        "Bekleyen paket güncellemelerini listeler.",
-        {"security_only": {"type": "boolean", "description": "Sadece güvenlik güncellemeleri"}},
+        "Lists pending package updates.",
+        {"security_only": {"type": "boolean", "description": "Security updates only"}},
         available_updates,
     ),
     ToolSpec(
         "package_info",
-        "Bir paketin kurulu olup olmadığını, sürümünü ve dnf bilgisini döndürür.",
-        {"name": {"type": "string", "description": "Paket adı"}},
+        "Returns whether a package is installed, its version and its dnf info.",
+        {"name": {"type": "string", "description": "Package name"}},
         package_info, required=["name"],
     ),
     ToolSpec(
         "service_action",
-        "Bir systemd servisini başlatır, durdurur, yeniden başlatır, yeniden yükler, etkinleştirir veya devre dışı bırakır.",
+        "Starts, stops, restarts, reloads, enables or disables a systemd service.",
         {
-            "service": {"type": "string", "description": "Servis adı"},
+            "service": {"type": "string", "description": "Service name"},
             "action": {"type": "string", "enum": SERVICE_ACTIONS},
         },
         service_action, required=["service", "action"], read_only=False,
@@ -522,39 +528,39 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "install_updates",
-        "dnf ile paket güncellemelerini kurar.",
-        {"security_only": {"type": "boolean", "description": "Sadece güvenlik güncellemeleri"}},
+        "Installs package updates with dnf.",
+        {"security_only": {"type": "boolean", "description": "Security updates only"}},
         install_updates, read_only=False,
         preview=lambda a: "dnf -y upgrade" + (" --security" if a.get("security_only") else ""),
     ),
     ToolSpec(
         "package_install",
-        "dnf ile paket kurar.",
-        {"names": {"type": "array", "items": {"type": "string"}, "description": "Paket adları"}},
+        "Installs packages with dnf.",
+        {"names": {"type": "array", "items": {"type": "string"}, "description": "Package names"}},
         package_install, required=["names"], read_only=False,
         preview=lambda a: f"dnf -y install {_names(a)}",
     ),
     ToolSpec(
         "package_remove",
-        "dnf ile paket kaldırır.",
-        {"names": {"type": "array", "items": {"type": "string"}, "description": "Paket adları"}},
+        "Removes packages with dnf.",
+        {"names": {"type": "array", "items": {"type": "string"}, "description": "Package names"}},
         package_remove, required=["names"], read_only=False,
         preview=lambda a: f"dnf -y remove {_names(a)}",
     ),
     ToolSpec(
         "firewall_rule",
-        "firewalld'ye kalıcı port veya servis kuralı ekler/kaldırır ve yeniden yükler.",
+        "Adds/removes a permanent firewalld port or service rule and reloads.",
         {
             "action": {"type": "string", "enum": ["add", "remove"]},
-            "port": {"type": "string", "description": "Port/protokol (örn. 8080/tcp, 3000-3010/udp)"},
-            "service": {"type": "string", "description": "firewalld servis adı (örn. http, https)"},
+            "port": {"type": "string", "description": "Port/protocol (e.g. 8080/tcp, 3000-3010/udp)"},
+            "service": {"type": "string", "description": "firewalld service name (e.g. http, https)"},
         },
         firewall_rule, required=["action"], read_only=False,
         preview=lambda a: f"firewall-cmd --permanent {_firewall_target(a)} && firewall-cmd --reload",
     ),
     ToolSpec(
         "reboot_server",
-        "Sunucuyu yeniden başlatır.",
+        "Reboots the server.",
         {}, reboot_server, read_only=False,
         preview=lambda a: "systemctl reboot",
     ),

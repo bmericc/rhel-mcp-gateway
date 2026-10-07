@@ -38,7 +38,7 @@ async def test_superuser():
     async with session() as s:
         r = await s.spawn(["id", "-u"], superuser=True)
     # sudo yetkisi olan kullanıcıda root, olmayanda açıklayıcı hata
-    assert r.stdout == "0\n" or "yönetici yetkisi alınamadı" in r.stderr
+    assert r.stdout == "0\n" or "could not obtain administrator privileges" in r.stderr
 
 
 async def test_wrong_password():

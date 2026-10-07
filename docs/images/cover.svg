@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#14b8a6"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.04"/></pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect x="70" y="80" width="8" height="200" rx="4" fill="url(#glow)"/>
+
+  <text x="100" y="118" font-size="22" font-weight="600" fill="#5eead4" letter-spacing="2">RHEL MCP GATEWAY</text>
+  <text x="100" y="185" font-size="52" font-weight="800" fill="#f8fafc">Managing my servers</text>
+  <text x="100" y="250" font-size="52" font-weight="800" fill="#f8fafc">by talking to Claude</text>
+  <text x="100" y="300" font-size="22" fill="#94a3b8">Cockpit + Model Context Protocol · open source</text>
+
+  <!-- chat -->
+  <g>
+    <rect x="100" y="370" width="430" height="64" rx="18" fill="#1e3a8a"/>
+    <text x="124" y="410" font-size="20" fill="#e0e7ff">Any failed services on the servers?</text>
+    <rect x="100" y="452" width="520" height="96" rx="18" fill="#0f172a" stroke="#334155"/>
+    <text x="124" y="488" font-size="17" fill="#5eead4" font-family="'JetBrains Mono', Menlo, monospace">→ fleet_health()</text>
+    <text x="124" y="522" font-size="19" fill="#cbd5e1">3 servers healthy, nginx is down on 1.</text>
+  </g>
+
+  <!-- flow -->
+  <g font-size="17" font-weight="700" text-anchor="middle">
+    <rect x="720" y="400" width="150" height="110" rx="16" fill="#1d4ed8"/>
+    <text x="795" y="450" fill="#fff">MCP</text>
+    <text x="795" y="475" fill="#fff">Gateway</text>
+    <path d="M876,455 L936,455" stroke="#14b8a6" stroke-width="4"/>
+    <path d="M934,447 L948,455 L934,463 z" fill="#14b8a6"/>
+    <g fill="#0f172a" stroke="#14b8a6" stroke-width="2">
+      <rect x="955" y="370" width="175" height="50" rx="10"/>
+      <rect x="955" y="430" width="175" height="50" rx="10"/>
+      <rect x="955" y="490" width="175" height="50" rx="10"/>
+    </g>
+    <g fill="#99f6e4" font-weight="600" font-size="16">
+      <text x="1042" y="401">Cockpit</text>
+      <text x="1042" y="461">SSH tunnel</text>
+      <text x="1042" y="521">SSH</text>
+    </g>
+    <g fill="#22c55e"><circle cx="972" cy="395" r="5"/><circle cx="972" cy="455" r="5"/><circle cx="972" cy="515" r="5"/></g>
+  </g>
+  <text x="1130" y="600" text-anchor="end" font-size="18" fill="#64748b">bahri.info</text>
+</svg>

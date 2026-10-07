@@ -144,7 +144,7 @@ async def test_target_unreachable_through_proxy(kind):
 
 
 async def test_proxy_unreachable():
-    with pytest.raises(outbound_proxy.ProxyError, match="Proxy'ye bağlanılamadı"):
+    with pytest.raises(outbound_proxy.ProxyError, match="Could not connect to the proxy"):
         await outbound_proxy.open_tunnel("socks5://127.0.0.1:1", "127.0.0.1", 22, timeout=3)
 
 
@@ -154,14 +154,14 @@ async def test_proxy_timeout():
     silent.bind(("127.0.0.1", 0))
     silent.listen()
     try:
-        with pytest.raises(outbound_proxy.ProxyError, match="zaman aşımı"):
+        with pytest.raises(outbound_proxy.ProxyError, match="timed out"):
             await outbound_proxy.open_tunnel(f"socks5://127.0.0.1:{silent.getsockname()[1]}", "127.0.0.1", 22, timeout=0.5)
     finally:
         silent.close()
 
 
 async def test_invalid_proxy_setting():
-    with pytest.raises(outbound_proxy.ProxyError, match="Geçersiz proxy"):
+    with pytest.raises(outbound_proxy.ProxyError, match="Invalid proxy"):
         await outbound_proxy.open_tunnel("ftp://h:1", "127.0.0.1", 22)
 
 
@@ -234,7 +234,7 @@ async def test_ssh_proxy_error_is_reported(monkeypatch, ssh_dirs):
     ssh_dirs("root")
     monkeypatch.setattr(main.asyncssh, "connect", lambda host, **kw: SSHConn())
     cfg = {"name": "s", "host": "127.0.0.1", "proxy": main.encrypt_secret("socks5://127.0.0.1:1")}
-    with pytest.raises(main.SSHError, match="Proxy'ye bağlanılamadı"):
+    with pytest.raises(main.SSHError, match="Could not connect to the proxy"):
         async with main.ssh_session(cfg):
             pass
 
@@ -248,8 +248,8 @@ def test_server_proxy_precedence(monkeypatch):
     assert main.server_proxy({}) == "socks5://varsayilan:1080"
     assert main.server_proxy({"proxy": enc("http://ozel:3128")}) == "http://ozel:3128"
     assert main.server_proxy({"proxy": enc("direct")}) is None
-    assert main.proxy_label({}) == "proxy socks5://varsayilan:1080 (varsayılan)"
-    assert main.proxy_label({"proxy": enc("direct")}) == "doğrudan"
+    assert main.proxy_label({}) == "proxy socks5://varsayilan:1080 (default)"
+    assert main.proxy_label({"proxy": enc("direct")}) == "direct"
 
 
 # --- Panel ---
@@ -295,7 +295,7 @@ def test_panel_proxy_lifecycle(client):
 
 def test_panel_rejects_invalid_proxy(client):
     resp = save(client, proxy="ftp://h:21")
-    assert "Geçersiz proxy" in client.get(resp.headers["location"]).text
+    assert "Invalid proxy" in client.get(resp.headers["location"]).text
     assert main.load_servers() == {}
 
 
@@ -319,8 +319,8 @@ async def test_public_ip_through_default_proxy(monkeypatch):
     direct = await main.public_ips()
     via = await main.public_ips(proxy=main.OUTBOUND_PROXY)
     html = main.public_ip_html(direct, via)
-    assert "Varsayılan proxy (socks5://p:1080) çıkış IP adresi: <code>198.51.100.9</code>" in html
-    assert "Gateway dış IP adresi: <code>203.0.113.7</code>" in html
+    assert "Default proxy (socks5://p:1080) egress IP address: <code>198.51.100.9</code>" in html
+    assert "Gateway public IP address: <code>203.0.113.7</code>" in html
 
 
 # --- Codex incelemesinden gelen durumlar ---
@@ -348,16 +348,16 @@ async def test_http_connect_keeps_bytes_after_header():
 def test_unreadable_proxy_setting_fails_closed(monkeypatch):
     monkeypatch.setattr(main, "OUTBOUND_PROXY", "socks5://varsayilan:1080")
     cfg = {"name": "s", "host": "h", "proxy": "bozuk-sifreli-deger"}
-    with pytest.raises(outbound_proxy.ProxyError, match="çözülemedi"):
+    with pytest.raises(outbound_proxy.ProxyError, match="could not be decrypted"):
         main.server_proxy(cfg)
-    assert main.proxy_label(cfg) == "proxy ayarı çözülemedi"
+    assert main.proxy_label(cfg) == "proxy setting unreadable"
 
 
 async def test_unreadable_proxy_blocks_ssh(monkeypatch, ssh_dirs):
     ssh_dirs("root")
     calls = []
     monkeypatch.setattr(main.asyncssh, "connect", lambda host, **kw: calls.append(kw) or SSHConn())
-    with pytest.raises(main.SSHError, match="çözülemedi"):
+    with pytest.raises(main.SSHError, match="could not be decrypted"):
         async with main.ssh_session({"name": "s", "host": "127.0.0.1", "proxy": "bozuk"}):
             pass
     assert calls == []
@@ -371,7 +371,7 @@ async def test_unreadable_proxy_blocks_cockpit_and_check(cockpit, monkeypatch, s
            "cockpit_password": main.encrypt_secret(PASSWORD), "proxy": "bozuk"}
     result = await main.check_server(cfg)
     assert result["ok"] is False
-    assert "çözülemedi" in result["message"]
+    assert "could not be decrypted" in result["message"]
     # Ne Cockpit'e ne SSH'a doğrudan bağlanıldı
     assert cockpit.fake.logins == []
     assert calls == []

@@ -1,5 +1,7 @@
 # RHEL MCP Gateway — Teknik Genel Bakış
 
+[English](overview.md) · **Türkçe**
+
 ![RHEL MCP Gateway](images/kapak.png)
 
 | | |
@@ -185,7 +187,7 @@ docker compose up -d --build
 | `oauth.json` | OAuth istemcileri ve token özetleri |
 | `ssh_keys.json` | Ortak SSH anahtarları (şifreli) |
 
-Yapılandırma değişkenlerinin tam listesi için [README](../README.md#ortam-değişkenleri-env) dosyasına bakınız.
+Yapılandırma değişkenlerinin tam listesi için [README](../README.tr.md#ortam-değişkenleri-env) dosyasına bakınız.
 
 ## 8. Kalite güvencesi
 
