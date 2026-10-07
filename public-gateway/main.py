@@ -606,28 +606,60 @@ def current_user(request: Request) -> str | None:
     username = (request.session.get('user') or {}).get('username')
     return username if username and authenticator.is_allowed(username) else None
 
-PAGE_STYLE = """
+BOOTSTRAP_CDN = "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist"
+
+PAGE_STYLE = f"""
+<link rel="stylesheet" href="{BOOTSTRAP_CDN}/css/bootstrap.min.css">
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
-  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; font-size: 14px; }
-  form.add { display: grid; grid-template-columns: 200px 1fr; gap: 8px; max-width: 640px; }
-  fieldset { border: 1px solid #ddd; margin: 12px 0; }
-  .note { color: #555; font-size: 13px; }
-  .err { color: #b00020; }
-  .ok { color: #1b7f3b; }
-  .warn { color: #a15c00; }
-  td form { display: inline; }
-  form.login { display: grid; grid-template-columns: 140px 220px; gap: 8px; }
-  textarea.key { width: 100%; font-family: monospace; font-size: 12px; }
-  form.filter { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-  table.logs td { vertical-align: top; }
-  table.logs pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0; font-size: 12px; max-height: 320px; overflow: auto; }
+  form.add, div.add {{ display: grid; grid-template-columns: 220px 1fr; gap: 8px; align-items: center; max-width: 720px; }}
+  form.add .form-check-input, form.add .btn {{ justify-self: start; margin: 0; }}
+  @media (max-width: 575.98px) {{ form.add, div.add {{ grid-template-columns: 1fr; }} }}
+  .note {{ color: var(--bs-secondary-color); font-size: .8125rem; }}
+  .err {{ color: var(--bs-danger); }}
+  .ok {{ color: var(--bs-success); }}
+  .warn {{ color: #a15c00; }}
+  td form {{ display: inline; }}
+  textarea.key {{ font-family: var(--bs-font-monospace); font-size: 12px; }}
+  table.logs td {{ vertical-align: top; }}
+  table.logs pre {{ white-space: pre-wrap; word-break: break-word; margin: 4px 0; font-size: 12px; max-height: 320px; overflow: auto; }}
+  code {{ word-break: break-word; }}
 </style>
 """
 
-def render_page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
-    """Tüm panel sayfaları için ortak HTML iskeleti (başlık, karakter seti, stil)."""
+# Üst menü: (anahtar, adres, etiket)
+NAV_ITEMS = [
+    ("servers", "/", "Sunucular"),
+    ("ssh-keys", "/#ssh-keys", "SSH Anahtarları"),
+    ("logs", "/logs", "İşlem Kayıtları"),
+]
+
+def navbar(user: str | None, active: str = "") -> str:
+    """Üst menü; giriş yapılmamışsa yalnızca başlık gösterilir."""
+    menu = ""
+    if user:
+        links = "".join(
+            f'<li class="nav-item"><a class="nav-link{" active" if key == active else ""}" href="{href}">{label}</a></li>'
+            for key, href, label in NAV_ITEMS
+        )
+        menu = f"""
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topnav"
+            aria-controls="topnav" aria-expanded="false" aria-label="Menü">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="topnav">
+      <ul class="navbar-nav me-auto">{links}</ul>
+      <span class="navbar-text me-3">{html.escape(user)}</span>
+      <a class="btn btn-sm btn-outline-light" href="/logout">Çıkış Yap</a>
+    </div>"""
+    return f"""<nav class="navbar navbar-expand-md navbar-dark bg-dark mb-4">
+  <div class="container">
+    <a class="navbar-brand" href="/">RHEL MCP Gateway</a>{menu}
+  </div>
+</nav>"""
+
+def render_page(title: str, body: str, status_code: int = 200, user: str | None = None,
+                active: str = "") -> HTMLResponse:
+    """Tüm panel sayfaları için ortak HTML iskeleti (başlık, karakter seti, stil, üst menü)."""
     return HTMLResponse(f"""<!doctype html>
 <html lang="tr">
 <head>
@@ -636,18 +668,22 @@ def render_page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
   <title>{html.escape(title)} · RHEL MCP Gateway</title>
   {PAGE_STYLE}
 </head>
-<body>
+<body class="bg-body-tertiary">
+{navbar(user, active)}
+<main class="container pb-5">
 {body}
+</main>
+<script src="{BOOTSTRAP_CDN}/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>""", status_code=status_code)
 
 def forbidden() -> HTMLResponse:
-    return render_page("Yetkiniz yok", "<h2>Yetkiniz yok</h2><p><a href='/login'>Giriş yap</a></p>", 403)
+    return render_page("Yetkiniz yok", "<h2 class='h4'>Yetkiniz yok</h2><p><a class='btn btn-primary' href='/login'>Giriş yap</a></p>", 403)
 
 def invalid_login_request() -> HTMLResponse:
     return render_page(
         "Giriş isteği geçersiz",
-        "<h2>Giriş isteği geçersiz</h2><p>Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.</p>",
+        "<h2 class='h4'>Giriş isteği geçersiz</h2><p>Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.</p>",
         400,
     )
 
@@ -724,7 +760,7 @@ def public_ip_html(ips: Dict[str, str | None], proxy_ips: Dict[str, str | None] 
         example = f"<br>Örnek (RHEL, firewalld): <code>{html.escape(rule)}</code>"
     return proxy_html + (
         f"<p>Gateway dış IP adresi: {codes} "
-        f"<form method='post' action='/public-ip/refresh' style='display:inline'><button>Yenile</button></form><br>"
+        f"<form method='post' action='/public-ip/refresh' style='display:inline'><button class='btn btn-sm btn-outline-secondary'>Yenile</button></form><br>"
         f"<span class='note'>Uzaktaki sunucularda bu adrese Cockpit (9090/tcp) ve SSH yedeği için 22/tcp izni verin. "
         f"Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.{example}</span></p>"
     )
@@ -818,9 +854,9 @@ def server_row(cfg: Dict[str, Any]) -> str:
     quoted = html.escape(name)
     return (
         f"<tr><td><b>{e(name)}</b><br><span class='note'>{e(proxy_label(cfg))}</span></td><td>{cockpit}</td><td>{ssh}</td><td>{status}</td>"
-        f"<td><form method='post' action='/servers/{quoted}/test'><button>Test et</button></form> "
+        f"<td><form method='post' action='/servers/{quoted}/test'><button class='btn btn-sm btn-outline-primary'>Test et</button></form> "
         f"<form method='post' action='/servers/{quoted}/delete' "
-        f"onsubmit=\"return confirm('{quoted} silinsin mi?')\"><button>Sil</button></form></td></tr>"
+        f"onsubmit=\"return confirm('{quoted} silinsin mi?')\"><button class='btn btn-sm btn-outline-danger'>Sil</button></form></td></tr>"
     )
 
 @app.get("/", response_class=HTMLResponse)
@@ -831,82 +867,86 @@ async def index(request: Request, error: str = "", info: str = ""):
 
     servers = load_servers()
     rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='5'>Henüz tanımlı sunucu yok.</td></tr>"
-    error_html = f"<p class='err'>{html.escape(error)}</p>" if error else ""
-    info_html = f"<p class='ok'>{html.escape(info)}</p>" if info else ""
+    error_html = f"<div class='alert alert-danger'>{html.escape(error)}</div>" if error else ""
+    info_html = f"<div class='alert alert-success'>{html.escape(info)}</div>" if info else ""
     key_rows = "".join(shared_key_row(k) for k in load_shared_keys().values()) or \
         "<tr><td colspan='4'>Henüz ortak anahtar yok.</td></tr>"
 
     return render_page("Sunucular", f"""
-        <h2>Hoş geldiniz, {html.escape(username)}!</h2>
-        <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code> · <a href="/logs">İşlem kayıtları</a></p>
-        {public_ip_html(await public_ips(), await public_ips(proxy=OUTBOUND_PROXY) if OUTBOUND_PROXY else None)}
-        <h3>Kayıtlı Sunucular</h3>
-        {info_html}
-        <table>
+        {info_html}{error_html}
+        <div class="card mb-4"><div class="card-body">
+          <h2 class="h5">Hoş geldiniz, {html.escape(username)}!</h2>
+          <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
+          {public_ip_html(await public_ips(), await public_ips(proxy=OUTBOUND_PROXY) if OUTBOUND_PROXY else None)}
+        </div></div>
+
+        <div class="card mb-4"><div class="card-header">Kayıtlı Sunucular</div><div class="card-body">
+        <div class="table-responsive"><table class="table table-sm table-bordered table-hover align-middle bg-body mb-0">
           <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th>Bağlantı durumu</th><th></th></tr>
           {rows}
-        </table>
+        </table></div>
+        </div></div>
 
-        <h3>Sunucu Ekle / Güncelle</h3>
+        <div class="card mb-4"><div class="card-header">Sunucu Ekle / Güncelle</div><div class="card-body">
         <p class="note">Aynı adla kaydetmek mevcut sunucuyu günceller. Şifre alanı boş bırakılırsa mevcut şifre korunur.
         Kaydetmeden önce sunucuya bağlanılıp bilgiler doğrulanır; bağlantı kurulamazsa kayıt yapılmaz.</p>
-        {error_html}
         <form class="add" method="post" action="/servers">
-          <label>Sunucu adı *</label><input name="name" required placeholder="prod-db">
-          <label>Host (IP / alan adı) *</label><input name="host" required placeholder="192.168.0.98">
-          <fieldset style="grid-column: 1 / -1">
-            <legend>Cockpit</legend>
+          <label>Sunucu adı *</label><input class="form-control form-control-sm" name="name" required placeholder="prod-db">
+          <label>Host (IP / alan adı) *</label><input class="form-control form-control-sm" name="host" required placeholder="192.168.0.98">
+          <fieldset class="border rounded p-3" style="grid-column: 1 / -1">
+            <legend class="float-none w-auto px-2 fs-6 mb-0">Cockpit</legend>
             <div class="add">
-              <label>Cockpit kullanıcısı</label><input name="cockpit_user" placeholder="bmericc">
-              <label>Cockpit şifresi</label><input name="cockpit_password" type="password" autocomplete="new-password">
-              <label>Cockpit adresi</label><input name="cockpit_url" placeholder="https://HOST:9090 (boşsa)">
-              <label>TLS sertifikasını doğrula</label><input name="cockpit_verify_tls" type="checkbox">
+              <label>Cockpit kullanıcısı</label><input class="form-control form-control-sm" name="cockpit_user" placeholder="bmericc">
+              <label>Cockpit şifresi</label><input class="form-control form-control-sm" name="cockpit_password" type="password" autocomplete="new-password">
+              <label>Cockpit adresi</label><input class="form-control form-control-sm" name="cockpit_url" placeholder="https://HOST:9090 (boşsa)">
+              <label>TLS sertifikasını doğrula</label><input name="cockpit_verify_tls" type="checkbox" class="form-check-input">
             </div>
           </fieldset>
-          <fieldset style="grid-column: 1 / -1">
-            <legend>SSH (yedek)</legend>
+          <fieldset class="border rounded p-3" style="grid-column: 1 / -1">
+            <legend class="float-none w-auto px-2 fs-6 mb-0">SSH (yedek)</legend>
             <div class="add">
-              <label>SSH kullanıcısı</label><input name="user" placeholder="boşsa SSH_LOGINS sırası">
-              <label>SSH portu</label><input name="port" type="number" value="22">
-              <label>SSH key yolu</label><input name="ssh_key_path" placeholder="boşsa kullanıcının .ssh klasörü">
+              <label>SSH kullanıcısı</label><input class="form-control form-control-sm" name="user" placeholder="boşsa SSH_LOGINS sırası">
+              <label>SSH portu</label><input class="form-control form-control-sm" name="port" type="number" value="22">
+              <label>SSH key yolu</label><input class="form-control form-control-sm" name="ssh_key_path" placeholder="boşsa kullanıcının .ssh klasörü">
             </div>
           </fieldset>
-          <fieldset style="grid-column: 1 / -1">
-            <legend>Bağlantı proxy'si</legend>
+          <fieldset class="border rounded p-3" style="grid-column: 1 / -1">
+            <legend class="float-none w-auto px-2 fs-6 mb-0">Bağlantı proxy'si</legend>
             <div class="add">
-              <label>Proxy</label><input name="proxy" autocomplete="off"
+              <label>Proxy</label><input class="form-control form-control-sm" name="proxy" autocomplete="off"
                 placeholder="socks5://host:1080 · http://host:3128 · direct · default">
             </div>
-            <p class="note">Cockpit ve SSH bağlantıları bu proxy üzerinden yapılır; sunucu proxy'nin IP adresini görür.
+            <p class="note mt-2 mb-0">Cockpit ve SSH bağlantıları bu proxy üzerinden yapılır; sunucu proxy'nin IP adresini görür.
             Boş bırakılırsa mevcut ayar korunur (yeni sunucuda varsayılan kullanılır).
             <code>default</code>: varsayılan (.env'deki OUTBOUND_PROXY{'' if not OUTBOUND_PROXY else ' = ' + html.escape(outbound_proxy.redact(OUTBOUND_PROXY))}),
             <code>direct</code>: proxysiz. Kullanıcı adı/parola adreste verilebilir (socks5://kullanici:parola@host:1080) ve şifreli saklanır.</p>
           </fieldset>
-          <label>Bağlantıyı test etmeden kaydet</label><input name="skip_check" type="checkbox">
-          <span></span><button type="submit">Kaydet</button>
+          <label>Bağlantıyı test etmeden kaydet</label><input name="skip_check" type="checkbox" class="form-check-input">
+          <span></span><button type="submit" class="btn btn-primary">Kaydet</button>
         </form>
+        </div></div>
 
-        <h3 id="ssh-keys">Ortak SSH Anahtarları</h3>
+        <div class="card mb-4" id="ssh-keys"><div class="card-header">Ortak SSH Anahtarları</div><div class="card-body">
         <p class="note">Buradaki anahtarlar SSH yedeğinde tüm sunucularda, her kullanıcı için denenir.
         Kullanmak için anahtarın açık kısmını sunuculardaki <code>~/.ssh/authorized_keys</code> dosyasına ekleyin.
         Özel anahtarlar <code>data/ssh_keys.json</code> içinde şifreli saklanır ve panelde gösterilmez.</p>
-        <table>
+        <div class="table-responsive"><table class="table table-sm table-bordered table-hover align-middle bg-body">
           <tr><th>Ad</th><th>Tür / parmak izi</th><th>Açık anahtar (authorized_keys satırı)</th><th></th></tr>
           {key_rows}
-        </table>
+        </table></div>
         <form class="add" method="post" action="/ssh-keys">
-          <label>Anahtar adı *</label><input name="name" required placeholder="ortak-anahtar">
-          <label>Özel anahtar *</label><textarea class="key" name="private_key" rows="6" required
+          <label>Anahtar adı *</label><input class="form-control form-control-sm" name="name" required placeholder="ortak-anahtar">
+          <label>Özel anahtar *</label><textarea class="key form-control form-control-sm" name="private_key" rows="6" required
             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-          <label>Anahtar parolası</label><input name="passphrase" type="password" autocomplete="off" placeholder="parolasızsa boş">
-          <span></span><button type="submit">Anahtarı ekle</button>
+          <label>Anahtar parolası</label><input class="form-control form-control-sm" name="passphrase" type="password" autocomplete="off" placeholder="parolasızsa boş">
+          <span></span><button type="submit" class="btn btn-primary">Anahtarı ekle</button>
         </form>
         <form class="add" method="post" action="/ssh-keys/generate" style="margin-top:12px">
-          <label>Yeni anahtar üret</label><input name="name" required placeholder="anahtar adı">
-          <span></span><button type="submit">Ed25519 anahtarı üret</button>
+          <label>Yeni anahtar üret</label><input class="form-control form-control-sm" name="name" required placeholder="anahtar adı">
+          <span></span><button type="submit" class="btn btn-outline-primary">Ed25519 anahtarı üret</button>
         </form>
-        <br><a href="/logout">Çıkış Yap</a>
-    """)
+        </div></div>
+    """, user=username, active="servers")
 
 def _redirect_error(message: str) -> RedirectResponse:
     return RedirectResponse(url="/?" + urlencode({"error": message}), status_code=303)
@@ -1037,9 +1077,9 @@ def shared_key_row(entry: Dict[str, Any]) -> str:
     return (
         f"<tr><td><b>{name}</b><br><span class='note'>{html.escape(entry.get('created', ''))}</span></td>"
         f"<td>{html.escape(entry.get('type', ''))}<br><span class='note'>{html.escape(entry.get('fingerprint', ''))}</span></td>"
-        f"<td><textarea class='key' rows='3' readonly onclick='this.select()'>{html.escape(entry.get('public', ''))}</textarea></td>"
+        f"<td><textarea class='key form-control' rows='3' readonly onclick='this.select()'>{html.escape(entry.get('public', ''))}</textarea></td>"
         f"<td><form method='post' action='/ssh-keys/{name}/delete' "
-        f"onsubmit=\"return confirm('{name} anahtarı silinsin mi?')\"><button>Sil</button></form></td></tr>"
+        f"onsubmit=\"return confirm('{name} anahtarı silinsin mi?')\"><button class='btn btn-sm btn-outline-danger'>Sil</button></form></td></tr>"
     )
 
 def _key_name(form) -> str | None:
@@ -1131,7 +1171,8 @@ def log_row(entry: Dict[str, Any]) -> str:
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request, q: str = "", source: str = "", status: str = "", user: str = "",
                     server: str = "", page: int = 1):
-    if not current_user(request):
+    username = current_user(request)
+    if not username:
         return forbidden()
     page = max(page, 1)
     entries, has_more = audit_log.read(LOGS_PER_PAGE, (page - 1) * LOGS_PER_PAGE, q=q, source=source,
@@ -1145,32 +1186,32 @@ async def logs_page(request: Request, q: str = "", source: str = "", status: str
 
     def page_link(number: int, label: str) -> str:
         query = urlencode({**{k: v for k, v in filters.items() if v}, "page": number})
-        return f"<a href='/logs?{query}'>{label}</a>"
+        return f"<a class='btn btn-sm btn-outline-secondary' href='/logs?{query}'>{label}</a>"
 
-    nav = " · ".join(filter(None, [
+    nav = " ".join(filter(None, [
         page_link(page - 1, "← Daha yeni") if page > 1 else "",
-        f"Sayfa {page}",
+        f"<span class='mx-2'>Sayfa {page}</span>",
         page_link(page + 1, "Daha eski →") if has_more else "",
     ]))
     return render_page("İşlem kayıtları", f"""
-        <h2>İşlem kayıtları</h2>
-        <p><a href="/">← Sunucular</a></p>
+        <h2 class="h4">İşlem kayıtları</h2>
         <p class="note">MCP araç çağrıları, panel işlemleri ve girişler. En yeni kayıt üsttedir.
         Kayıtlar <code>{html.escape(audit_log.LOG_FILE)}</code> dosyasında tutulur; şifreler ve anahtarlar kaydedilmez.</p>
-        <form class="filter" method="get" action="/logs">
-          <input name="q" value="{html.escape(q)}" placeholder="Ara (komut, araç, çıktı…)">
-          <input name="user" value="{html.escape(user)}" placeholder="Kullanıcı" size="12">
-          <input name="server" value="{html.escape(server)}" placeholder="Sunucu" size="12">
-          <select name="source">{options(source, {"": "Tüm kaynaklar", "mcp": "MCP", "web": "Panel"})}</select>
-          <select name="status">{options(status, {"": "Tüm durumlar", "ok": "Başarılı", "error": "Hata", "preview": "Onay bekliyor"})}</select>
-          <button type="submit">Filtrele</button> <a href="/logs">Temizle</a>
+        <form class="row g-2 align-items-center mb-3" method="get" action="/logs">
+          <div class="col-md"><input class="form-control form-control-sm" name="q" value="{html.escape(q)}" placeholder="Ara (komut, araç, çıktı…)"></div>
+          <div class="col-6 col-md-2"><input class="form-control form-control-sm" name="user" value="{html.escape(user)}" placeholder="Kullanıcı"></div>
+          <div class="col-6 col-md-2"><input class="form-control form-control-sm" name="server" value="{html.escape(server)}" placeholder="Sunucu"></div>
+          <div class="col-6 col-md-auto"><select class="form-select form-select-sm" name="source">{options(source, {"": "Tüm kaynaklar", "mcp": "MCP", "web": "Panel"})}</select></div>
+          <div class="col-6 col-md-auto"><select class="form-select form-select-sm" name="status">{options(status, {"": "Tüm durumlar", "ok": "Başarılı", "error": "Hata", "preview": "Onay bekliyor"})}</select></div>
+          <div class="col-auto"><button type="submit" class="btn btn-sm btn-primary">Filtrele</button>
+            <a class="btn btn-sm btn-link" href="/logs">Temizle</a></div>
         </form>
-        <table class="logs">
+        <div class="table-responsive"><table class="logs table table-sm table-bordered table-hover align-middle bg-body">
           <tr><th>Zaman</th><th>Kullanıcı</th><th>Kaynak</th><th>İşlem</th><th>Sunucu</th><th>Durum</th><th>Ayrıntı</th></tr>
           {rows}
-        </table>
+        </table></div>
         <p>{nav}</p>
-    """)
+    """, user=username, active="logs")
 
 def login_page(action: str, title: str, error: str = "", note: str = "", hidden: Dict[str, str] | None = None,
                status_code: int = 200, ask_token: bool = False) -> HTMLResponse:
@@ -1178,16 +1219,20 @@ def login_page(action: str, title: str, error: str = "", note: str = "", hidden:
         f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'>" for k, v in (hidden or {}).items()
     )
     return render_page(title, f"""
-        <h2>{html.escape(title)}</h2>
+        <div class="card mx-auto shadow-sm" style="max-width: 420px"><div class="card-body">
+        <h2 class="h5 mb-3">{html.escape(title)}</h2>
         <p class="note">{note}Cockpit kullanıcı adınız ve parolanızla giriş yapın ({html.escape(COCKPIT_AUTH_URL)}).</p>
-        {f"<p class='err'>{html.escape(error)}</p>" if error else ""}
-        <form class="login" method="post" action="{html.escape(action)}">
+        {f"<div class='alert alert-danger py-2'>{html.escape(error)}</div>" if error else ""}
+        <form method="post" action="{html.escape(action)}">
           {hidden_inputs}
-          <label>Kullanıcı adı</label><input name="username" autocomplete="username" required autofocus>
-          <label>Cockpit parolası</label><input name="password" type="password" autocomplete="current-password" required>
-          {'<label>Gateway parolası</label><input name="token" type="password" autocomplete="off" required>' if ask_token else ''}
-          <span></span><button type="submit">Giriş Yap</button>
+          <div class="mb-3"><label class="form-label">Kullanıcı adı</label>
+            <input class="form-control" name="username" autocomplete="username" required autofocus></div>
+          <div class="mb-3"><label class="form-label">Cockpit parolası</label>
+            <input class="form-control" name="password" type="password" autocomplete="current-password" required></div>
+          {'<div class="mb-3"><label class="form-label">Gateway parolası</label><input class="form-control" name="token" type="password" autocomplete="off" required></div>' if ask_token else ''}
+          <button type="submit" class="btn btn-primary w-100">Giriş Yap</button>
         </form>
+        </div></div>
     """, status_code)
 
 TOKEN_ERROR = "Gateway parolası hatalı."
