@@ -8,3 +8,4 @@ asyncssh
 httpx
 mcp>=1.10,<2
 cryptography
+bcrypt

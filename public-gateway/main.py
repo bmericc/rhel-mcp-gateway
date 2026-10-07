@@ -8,6 +8,7 @@ import secrets
 import shlex
 from urllib.parse import urlencode
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
@@ -127,9 +128,71 @@ def parse_ssh_logins(value: str) -> list[tuple[str, str]]:
 def find_ssh_keys(ssh_dir: str) -> list[str]:
     return [p for p in (os.path.join(ssh_dir, n) for n in SSH_KEY_NAMES) if os.path.isfile(p)]
 
-def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list[str]]]:
-    """Önce sunucuya tanımlı kullanıcı, ardından SSH_LOGINS'teki diğer kullanıcılar denenir."""
+# --- Ortak SSH anahtarları (web panelinden eklenir, tüm sunucularda denenir) ---
+SSH_KEYS_FILE = "data/ssh_keys.json"
+MAX_KEY_SIZE = 16 * 1024
+
+def load_shared_keys() -> Dict[str, Dict[str, Any]]:
+    if not os.path.exists(SSH_KEYS_FILE):
+        return {}
+    try:
+        with open(SSH_KEYS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_shared_keys(keys: Dict[str, Dict[str, Any]]):
+    os.makedirs(os.path.dirname(SSH_KEYS_FILE), exist_ok=True)
+    tmp = SSH_KEYS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(keys, f, indent=4)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, SSH_KEYS_FILE)
+
+def shared_key_entry(name: str, key: "asyncssh.SSHKey") -> Dict[str, Any]:
+    """Özel anahtar şifrelenmiş (ve parolasız hâliyle) saklanır; açık anahtar gösterim içindir."""
+    return {
+        "name": name,
+        "type": key.get_algorithm(),
+        "fingerprint": key.get_fingerprint(),
+        "public": key.export_public_key().decode().strip(),
+        "private": encrypt_secret(key.export_private_key().decode()),
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+def import_shared_key(name: str, private_text: str, passphrase: str = "") -> Dict[str, Any]:
+    if len(private_text) > MAX_KEY_SIZE:
+        raise ValueError("Anahtar çok büyük.")
+    try:
+        key = asyncssh.import_private_key(private_text.strip() + "\n", passphrase or None)
+    except asyncssh.KeyEncryptionError:
+        raise ValueError("Anahtarın parolası hatalı.")
+    except asyncssh.KeyImportError as e:
+        if "Passphrase" in str(e):
+            raise ValueError("Bu anahtar parolalı; anahtar parolasını da girin.")
+        raise ValueError("Geçerli bir SSH özel anahtarı değil (açık anahtar değil, özel anahtar yapıştırın).")
+    return shared_key_entry(name, key)
+
+def shared_client_keys() -> list:
+    """Çözülebilen tüm ortak anahtarlar (asyncssh SSHKey nesneleri)."""
+    keys = []
+    for entry in load_shared_keys().values():
+        private = decrypt_secret(entry.get("private", ""))
+        if private is None:
+            continue
+        try:
+            keys.append(asyncssh.import_private_key(private))
+        except Exception:
+            continue
+    return keys
+
+def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list]]:
+    """Önce sunucuya tanımlı kullanıcı, ardından SSH_LOGINS'teki diğer kullanıcılar denenir.
+
+    Her kullanıcı için kendi .ssh klasöründeki anahtarlara ek olarak ortak anahtarlar da denenir.
+    """
     logins = parse_ssh_logins(SSH_LOGINS)
+    shared = shared_client_keys()
     candidates = []
     cfg_user = cfg.get("user")
     if cfg_user:
@@ -137,12 +200,13 @@ def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list[str]]]:
             keys = [cfg["ssh_key_path"]]
         else:
             keys = find_ssh_keys(dict(logins).get(cfg_user, ""))
+        keys = [*keys, *shared]
         if keys:
             candidates.append((cfg_user, keys))
     for user, ssh_dir in logins:
         if user == cfg_user:
             continue
-        keys = find_ssh_keys(ssh_dir)
+        keys = [*find_ssh_keys(ssh_dir), *shared]
         if keys:
             candidates.append((user, keys))
     return candidates
@@ -150,8 +214,10 @@ def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list[str]]]:
 class SSHError(Exception):
     """Bağlantı kurulamadı veya hiçbir kullanıcı ile giriş yapılamadı."""
 
+SSH_CONNECT_TIMEOUT = 15
+
 @asynccontextmanager
-async def ssh_session(cfg: Dict[str, Any]):
+async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_TIMEOUT):
     """Sunucuya bağlanır; (kullanıcı, bağlantı) döner.
 
     Kimlik doğrulama reddedilirse sıradaki kullanıcı denenir; ağ hatasında hemen vazgeçilir.
@@ -168,7 +234,9 @@ async def ssh_session(cfg: Dict[str, Any]):
                 port=cfg.get("port", 22),
                 username=user,
                 client_keys=keys,
-                known_hosts=None
+                known_hosts=None,
+                # asyncssh'de varsayılan olarak bağlantı için zaman aşımı yok; takılan sunucu beklenmesin
+                connect_timeout=connect_timeout,
             )
             conn = await cm.__aenter__()
         except asyncssh.PermissionDenied as e:
@@ -177,7 +245,8 @@ async def ssh_session(cfg: Dict[str, Any]):
             continue
         except Exception as e:
             # Ağ/bağlantı hatasında diğer kullanıcıları denemenin anlamı yok
-            raise SSHError(f"SSH Bağlantı Hatası: {str(e)}") from e
+            reason = "bağlantı zaman aşımına uğradı" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else (str(e) or type(e).__name__)
+            raise SSHError(f"SSH Bağlantı Hatası: {reason}") from e
         try:
             yield user, conn
         finally:
@@ -372,43 +441,134 @@ PAGE_STYLE = """
   fieldset { border: 1px solid #ddd; margin: 12px 0; }
   .note { color: #555; font-size: 13px; }
   .err { color: #b00020; }
+  .ok { color: #1b7f3b; }
+  td form { display: inline; }
   form.login { display: grid; grid-template-columns: 140px 220px; gap: 8px; }
+  textarea.key { width: 100%; font-family: monospace; font-size: 12px; }
 </style>
 """
+
+def render_page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
+    """Tüm panel sayfaları için ortak HTML iskeleti (başlık, karakter seti, stil)."""
+    return HTMLResponse(f"""<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)} · RHEL MCP Gateway</title>
+  {PAGE_STYLE}
+</head>
+<body>
+{body}
+</body>
+</html>""", status_code=status_code)
+
+def forbidden() -> HTMLResponse:
+    return render_page("Yetkiniz yok", "<h2>Yetkiniz yok</h2><p><a href='/login'>Giriş yap</a></p>", 403)
+
+def invalid_login_request() -> HTMLResponse:
+    return render_page(
+        "Giriş isteği geçersiz",
+        "<h2>Giriş isteği geçersiz</h2><p>Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.</p>",
+        400,
+    )
+
+CHECK_TIMEOUT = 10
+
+async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Sunucuya gerçekten bağlanıp basit bir komut çalıştırarak bilgileri doğrular.
+
+    Cockpit tanımlıysa Cockpit'in çalışması gerekir (SSH yedeği yalnızca bilgi olarak denenir);
+    tanımlı değilse SSH denenir.
+    """
+    checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    async def try_ssh() -> str | None:
+        try:
+            async with ssh_session(cfg, connect_timeout=CHECK_TIMEOUT) as (user, conn):
+                result = await make_runner(user, conn)("true", timeout=CHECK_TIMEOUT)
+            if result.exit_status != 0:
+                return f"SSH komutu başarısız: {result.stderr.strip() or result.exit_status}"
+            return None
+        except Exception as e:
+            return str(e)
+
+    if cfg.get("cockpit_user"):
+        password = decrypt_secret(cfg.get("cockpit_password", ""))
+        error = None
+        if password is None:
+            error = "Cockpit şifresi çözülemedi; şifreyi yeniden girin."
+        else:
+            session = cockpit_client.CockpitSession(
+                cockpit_url(cfg), cfg["cockpit_user"], password,
+                verify_tls=bool(cfg.get("cockpit_verify_tls")), connect_timeout=CHECK_TIMEOUT,
+            )
+            try:
+                await session.connect()
+                result = await session.spawn(["true"], timeout=CHECK_TIMEOUT)
+                if result.exit_status != 0:
+                    error = f"Cockpit üzerinden komut çalıştırılamadı: {result.stderr.strip() or result.exit_status}"
+            except cockpit_client.CockpitError as e:
+                error = str(e)
+            finally:
+                await session.close()
+        if error is None:
+            return {"ok": True, "via": "cockpit", "message": "Cockpit bağlantısı başarılı.", "at": checked_at}
+        ssh_error = await try_ssh()
+        fallback = "SSH yedeği çalışıyor." if ssh_error is None else "SSH yedeği de çalışmıyor."
+        return {"ok": False, "via": None, "message": f"{error} ({fallback})", "at": checked_at}
+
+    ssh_error = await try_ssh()
+    if ssh_error is None:
+        return {"ok": True, "via": "ssh", "message": "SSH bağlantısı başarılı.", "at": checked_at}
+    return {"ok": False, "via": None, "message": ssh_error, "at": checked_at}
 
 def server_row(cfg: Dict[str, Any]) -> str:
     e = lambda v: html.escape(str(v)) if v not in (None, "") else "—"
     name = cfg["name"]
     cockpit = f"{e(cfg['cockpit_user'])} @ {e(cockpit_url(cfg))}" if cfg.get("cockpit_user") else "—"
     ssh = f"{e(cfg.get('user') or 'otomatik')} @ {e(cfg['host'])}:{e(cfg.get('port', 22))}"
+    check = cfg.get("last_check")
+    if check:
+        mark, css = ("✓", "ok") if check.get("ok") else ("✗", "err")
+        status = (f"<span class='{css}' title='{e(check.get('message'))}'>{mark} {e(check.get('message'))}</span>"
+                  f"<br><span class='note'>{e(check.get('at'))}</span>")
+    else:
+        status = "<span class='note'>Test edilmedi</span>"
+    quoted = html.escape(name)
     return (
-        f"<tr><td><b>{e(name)}</b></td><td>{cockpit}</td><td>{ssh}</td>"
-        f"<td><form method='post' action='/servers/{html.escape(name)}/delete' "
-        f"onsubmit=\"return confirm('{html.escape(name)} silinsin mi?')\"><button>Sil</button></form></td></tr>"
+        f"<tr><td><b>{e(name)}</b></td><td>{cockpit}</td><td>{ssh}</td><td>{status}</td>"
+        f"<td><form method='post' action='/servers/{quoted}/test'><button>Test et</button></form> "
+        f"<form method='post' action='/servers/{quoted}/delete' "
+        f"onsubmit=\"return confirm('{quoted} silinsin mi?')\"><button>Sil</button></form></td></tr>"
     )
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request, error: str = ""):
+async def index(request: Request, error: str = "", info: str = ""):
     username = current_user(request)
     if not username:
         return RedirectResponse(url="/login", status_code=303)
 
     servers = load_servers()
-    rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='4'>Henüz tanımlı sunucu yok.</td></tr>"
+    rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='5'>Henüz tanımlı sunucu yok.</td></tr>"
     error_html = f"<p class='err'>{html.escape(error)}</p>" if error else ""
+    info_html = f"<p class='ok'>{html.escape(info)}</p>" if info else ""
+    key_rows = "".join(shared_key_row(k) for k in load_shared_keys().values()) or \
+        "<tr><td colspan='4'>Henüz ortak anahtar yok.</td></tr>"
 
-    return f"""
-        {PAGE_STYLE}
+    return render_page("Sunucular", f"""
         <h2>Hoş geldiniz, {html.escape(username)}!</h2>
         <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
         <h3>Kayıtlı Sunucular</h3>
+        {info_html}
         <table>
-          <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th></th></tr>
+          <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th>Bağlantı durumu</th><th></th></tr>
           {rows}
         </table>
 
         <h3>Sunucu Ekle / Güncelle</h3>
-        <p class="note">Aynı adla kaydetmek mevcut sunucuyu günceller. Şifre alanı boş bırakılırsa mevcut şifre korunur.</p>
+        <p class="note">Aynı adla kaydetmek mevcut sunucuyu günceller. Şifre alanı boş bırakılırsa mevcut şifre korunur.
+        Kaydetmeden önce sunucuya bağlanılıp bilgiler doğrulanır; bağlantı kurulamazsa kayıt yapılmaz.</p>
         {error_html}
         <form class="add" method="post" action="/servers">
           <label>Sunucu adı *</label><input name="name" required placeholder="prod-db">
@@ -430,19 +590,42 @@ async def index(request: Request, error: str = ""):
               <label>SSH key yolu</label><input name="ssh_key_path" placeholder="boşsa kullanıcının .ssh klasörü">
             </div>
           </fieldset>
+          <label>Bağlantıyı test etmeden kaydet</label><input name="skip_check" type="checkbox">
           <span></span><button type="submit">Kaydet</button>
         </form>
+
+        <h3 id="ssh-keys">Ortak SSH Anahtarları</h3>
+        <p class="note">Buradaki anahtarlar SSH yedeğinde tüm sunucularda, her kullanıcı için denenir.
+        Kullanmak için anahtarın açık kısmını sunuculardaki <code>~/.ssh/authorized_keys</code> dosyasına ekleyin.
+        Özel anahtarlar <code>data/ssh_keys.json</code> içinde şifreli saklanır ve panelde gösterilmez.</p>
+        <table>
+          <tr><th>Ad</th><th>Tür / parmak izi</th><th>Açık anahtar (authorized_keys satırı)</th><th></th></tr>
+          {key_rows}
+        </table>
+        <form class="add" method="post" action="/ssh-keys">
+          <label>Anahtar adı *</label><input name="name" required placeholder="ortak-anahtar">
+          <label>Özel anahtar *</label><textarea class="key" name="private_key" rows="6" required
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+          <label>Anahtar parolası</label><input name="passphrase" type="password" autocomplete="off" placeholder="parolasızsa boş">
+          <span></span><button type="submit">Anahtarı ekle</button>
+        </form>
+        <form class="add" method="post" action="/ssh-keys/generate" style="margin-top:12px">
+          <label>Yeni anahtar üret</label><input name="name" required placeholder="anahtar adı">
+          <span></span><button type="submit">Ed25519 anahtarı üret</button>
+        </form>
         <br><a href="/logout">Çıkış Yap</a>
-    """
+    """)
 
 def _redirect_error(message: str) -> RedirectResponse:
-    from urllib.parse import quote
-    return RedirectResponse(url=f"/?error={quote(message)}", status_code=303)
+    return RedirectResponse(url="/?" + urlencode({"error": message}), status_code=303)
+
+def _redirect_info(message: str) -> RedirectResponse:
+    return RedirectResponse(url="/?" + urlencode({"info": message}), status_code=303)
 
 @app.post("/servers")
 async def save_server(request: Request):
     if not current_user(request):
-        return HTMLResponse("Yetkiniz yok", status_code=403)
+        return forbidden()
     form = await request.form()
     field = lambda k: (form.get(k) or "").strip()
 
@@ -481,26 +664,112 @@ async def save_server(request: Request):
         else:
             return _redirect_error("Cockpit kullanıcısı için şifre gerekli.")
 
+    if form.get("skip_check"):
+        # Bilgiler test edilmedi: eski (başka ayarlara ait olabilecek) durum gösterilmesin
+        servers[name] = cfg
+        save_servers(servers)
+        return _redirect_info(f"'{name}' bağlantı testi yapılmadan kaydedildi.")
+
+    check = await check_server(cfg)
+    if not check["ok"]:
+        return _redirect_error(f"'{name}' kaydedilmedi, bağlantı kurulamadı: {check['message']}")
+    cfg["last_check"] = check
+    # Kontrol sürerken dosya değişmiş olabilir; en güncel hâli üzerine yaz
+    servers = load_servers()
     servers[name] = cfg
     save_servers(servers)
-    return RedirectResponse(url="/", status_code=303)
+    return _redirect_info(f"'{name}' kaydedildi. {check['message']}")
+
+@app.post("/servers/{name}/test")
+async def test_server(name: str, request: Request):
+    if not current_user(request):
+        return forbidden()
+    cfg = load_servers().get(name)
+    if cfg is None:
+        return _redirect_error(f"'{name}' bulunamadı.")
+    check = await check_server(cfg)
+    servers = load_servers()
+    if name in servers:
+        servers[name]["last_check"] = check
+        save_servers(servers)
+    if check["ok"]:
+        return _redirect_info(f"'{name}': {check['message']}")
+    return _redirect_error(f"'{name}': {check['message']}")
 
 @app.post("/servers/{name}/delete")
 async def delete_server(name: str, request: Request):
     if not current_user(request):
-        return HTMLResponse("Yetkiniz yok", status_code=403)
+        return forbidden()
     servers = load_servers()
     servers.pop(name, None)
     save_servers(servers)
     return RedirectResponse(url="/", status_code=303)
+
+def shared_key_row(entry: Dict[str, Any]) -> str:
+    name = html.escape(entry["name"])
+    return (
+        f"<tr><td><b>{name}</b><br><span class='note'>{html.escape(entry.get('created', ''))}</span></td>"
+        f"<td>{html.escape(entry.get('type', ''))}<br><span class='note'>{html.escape(entry.get('fingerprint', ''))}</span></td>"
+        f"<td><textarea class='key' rows='3' readonly onclick='this.select()'>{html.escape(entry.get('public', ''))}</textarea></td>"
+        f"<td><form method='post' action='/ssh-keys/{name}/delete' "
+        f"onsubmit=\"return confirm('{name} anahtarı silinsin mi?')\"><button>Sil</button></form></td></tr>"
+    )
+
+def _key_name(form) -> str | None:
+    name = (form.get("name") or "").strip()
+    return name if SERVER_NAME_RE.match(name) else None
+
+@app.post("/ssh-keys")
+async def add_shared_key(request: Request):
+    if not current_user(request):
+        return forbidden()
+    form = await request.form()
+    name = _key_name(form)
+    if not name:
+        return _redirect_error("Anahtar adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir.")
+    keys = load_shared_keys()
+    if name in keys:
+        # Eski açık anahtar sunuculara dağıtılmış olabilir; yanlışlıkla üzerine yazılmasın
+        return _redirect_error(f"'{name}' adında bir anahtar zaten var. Değiştirmek için önce silin.")
+    try:
+        entry = import_shared_key(name, form.get("private_key") or "", form.get("passphrase") or "")
+    except ValueError as e:
+        return _redirect_error(f"Anahtar eklenmedi: {e}")
+    keys[name] = entry
+    save_shared_keys(keys)
+    return _redirect_info(f"'{name}' anahtarı eklendi ({entry['fingerprint']}).")
+
+@app.post("/ssh-keys/generate")
+async def generate_shared_key(request: Request):
+    if not current_user(request):
+        return forbidden()
+    form = await request.form()
+    name = _key_name(form)
+    if not name:
+        return _redirect_error("Anahtar adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir.")
+    keys = load_shared_keys()
+    if name in keys:
+        return _redirect_error(f"'{name}' adında bir anahtar zaten var.")
+    key = asyncssh.generate_private_key("ssh-ed25519", comment=f"rhel-mcp-gateway:{name}")
+    keys[name] = shared_key_entry(name, key)
+    save_shared_keys(keys)
+    return _redirect_info(f"'{name}' anahtarı üretildi. Açık anahtarı sunuculardaki authorized_keys dosyasına ekleyin.")
+
+@app.post("/ssh-keys/{name}/delete")
+async def delete_shared_key(name: str, request: Request):
+    if not current_user(request):
+        return forbidden()
+    keys = load_shared_keys()
+    keys.pop(name, None)
+    save_shared_keys(keys)
+    return _redirect_info(f"'{name}' anahtarı silindi.")
 
 def login_page(action: str, title: str, error: str = "", note: str = "", hidden: Dict[str, str] | None = None,
                status_code: int = 200, ask_token: bool = False) -> HTMLResponse:
     hidden_inputs = "".join(
         f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'>" for k, v in (hidden or {}).items()
     )
-    return HTMLResponse(f"""
-        {PAGE_STYLE}
+    return render_page(title, f"""
         <h2>{html.escape(title)}</h2>
         <p class="note">{note}Cockpit kullanıcı adınız ve parolanızla giriş yapın ({html.escape(COCKPIT_AUTH_URL)}).</p>
         {f"<p class='err'>{html.escape(error)}</p>" if error else ""}
@@ -511,7 +780,7 @@ def login_page(action: str, title: str, error: str = "", note: str = "", hidden:
           {'<label>Gateway parolası</label><input name="token" type="password" autocomplete="off" required>' if ask_token else ''}
           <span></span><button type="submit">Giriş Yap</button>
         </form>
-    """, status_code=status_code)
+    """, status_code)
 
 TOKEN_ERROR = "Gateway parolası hatalı."
 
@@ -542,7 +811,7 @@ async def login_submit(request: Request):
 async def oauth_login_form(request_id: str = Query(alias="request")):
     client_name = oauth_provider.pending_client_name(request_id)
     if client_name is None:
-        return HTMLResponse("Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.", status_code=400)
+        return invalid_login_request()
     return login_page(
         "/oauth/login", "MCP İstemcisine Erişim İzni",
         note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
@@ -556,7 +825,7 @@ async def oauth_login_submit(request: Request):
     request_id = form.get("request") or ""
     client_name = oauth_provider.pending_client_name(request_id)
     if client_name is None:
-        return HTMLResponse("Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.", status_code=400)
+        return invalid_login_request()
     username = (form.get("username") or "").strip()
     # Token: istemcinin bağlandığı URL'den (?token=) ya da formdan
     url_token = token_from_url(oauth_provider.pending_resource(request_id))
