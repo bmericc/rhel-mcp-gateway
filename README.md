@@ -4,12 +4,7 @@
 
 RHEL sunucularını, üzerlerindeki [Cockpit](https://cockpit-project.org) aracılığıyla [Model Context Protocol (MCP)](https://modelcontextprotocol.io) istemcilerine (Claude vb.) açan bir gateway. Yapay zekâ asistanı sunucuların durumunu okuyabilir, servis/paket/firewall yönetebilir ve komut çalıştırabilir.
 
-```
-MCP istemcisi ──MCP (SSE + OAuth)──▶ public-gateway (:7435) ──Cockpit (wss://host:9090)──────────▶ RHEL sunucuları
-                                            │                 ├─SSH tüneli ▶ sunucunun localhost:9090 ─▶
-                                            │                 └─SSH (son yedek)─────────────────────▶
-                                            └── giriş: Cockpit hesabı (COCKPIT_AUTH_URL)
-```
+![RHEL MCP Gateway nasıl çalışıyor](docs/images/nasil-calisiyor.png)
 
 - Komutlar sunucudaki **Cockpit** üzerinden çalışır. Cockpit portuna dışarıdan ulaşılamazsa Cockpit'e **SSH tüneli** içinden bağlanılır; o da olmazsa komutlar doğrudan **SSH** ile çalışır.
 - Gateway'e giriş (web paneli ve MCP istemcileri) **Cockpit hesabıyla** yapılır. Ayrı bir kullanıcı veritabanı yoktur.
