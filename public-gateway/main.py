@@ -5,6 +5,7 @@ import json
 import base64
 import hashlib
 import secrets
+import ipaddress
 import shlex
 from urllib.parse import urlencode
 import asyncio
@@ -16,6 +17,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Resp
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 import asyncssh
+import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
 import auth
@@ -475,6 +477,63 @@ def invalid_login_request() -> HTMLResponse:
 
 CHECK_TIMEOUT = 10
 
+# --- Gateway'in dış (public) IP adresi ---
+# Uzaktaki sunucuların güvenlik duvarında izin verilmesi gereken adres; panelde gösterilir.
+PUBLIC_IP_SERVICES = {
+    "ipv4": ["https://api.ipify.org", "https://ipv4.icanhazip.com"],
+    "ipv6": ["https://api6.ipify.org", "https://ipv6.icanhazip.com"],
+}
+PUBLIC_IP_CACHE_TTL = 600
+_public_ip_cache: Dict[str, Any] = {"at": 0.0, "value": None}
+
+async def _fetch_ip(url: str) -> str | None:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(url)
+        value = resp.text.strip()
+        ipaddress.ip_address(value)
+        return value
+    except Exception:
+        return None
+
+async def public_ips(force: bool = False) -> Dict[str, str | None]:
+    """{"ipv4": ..., "ipv6": ...}; belirlenemeyenler None. Sonuç 10 dakika önbelleklenir."""
+    if not force and _public_ip_cache["value"] and time.time() - _public_ip_cache["at"] < PUBLIC_IP_CACHE_TTL:
+        return _public_ip_cache["value"]
+
+    async def first(urls):
+        for url in urls:
+            ip = await _fetch_ip(url)
+            if ip:
+                return ip
+        return None
+
+    v4, v6 = await asyncio.gather(first(PUBLIC_IP_SERVICES["ipv4"]), first(PUBLIC_IP_SERVICES["ipv6"]))
+    value = {"ipv4": v4, "ipv6": v6}
+    # Hiçbiri bulunamadıysa önbelleğe alma; sonraki sayfa açılışında tekrar denensin
+    if v4 or v6:
+        _public_ip_cache.update(at=time.time(), value=value)
+    return value
+
+def public_ip_html(ips: Dict[str, str | None]) -> str:
+    found = [ip for ip in (ips.get("ipv4"), ips.get("ipv6")) if ip]
+    if not found:
+        return ("<p class='note'>Gateway'in dış IP adresi belirlenemedi "
+                "(dışarıya erişim kapalı olabilir).</p>")
+    codes = " ".join(f"<code>{html.escape(ip)}</code>" for ip in found)
+    v4 = ips.get("ipv4")
+    example = ""
+    if v4:
+        rule = (f"firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" source address=\"{v4}\" "
+                f"port port=\"9090\" protocol=\"tcp\" accept' && firewall-cmd --reload")
+        example = f"<br>Örnek (RHEL, firewalld): <code>{html.escape(rule)}</code>"
+    return (
+        f"<p>Gateway dış IP adresi: {codes} "
+        f"<form method='post' action='/public-ip/refresh' style='display:inline'><button>Yenile</button></form><br>"
+        f"<span class='note'>Uzaktaki sunucularda bu adrese Cockpit (9090/tcp) ve SSH yedeği için 22/tcp izni verin. "
+        f"Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.{example}</span></p>"
+    )
+
 async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Sunucuya gerçekten bağlanıp basit bir komut çalıştırarak bilgileri doğrular.
 
@@ -559,6 +618,7 @@ async def index(request: Request, error: str = "", info: str = ""):
     return render_page("Sunucular", f"""
         <h2>Hoş geldiniz, {html.escape(username)}!</h2>
         <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
+        {public_ip_html(await public_ips())}
         <h3>Kayıtlı Sunucular</h3>
         {info_html}
         <table>
@@ -679,6 +739,16 @@ async def save_server(request: Request):
     servers[name] = cfg
     save_servers(servers)
     return _redirect_info(f"'{name}' kaydedildi. {check['message']}")
+
+@app.post("/public-ip/refresh")
+async def refresh_public_ip(request: Request):
+    if not current_user(request):
+        return forbidden()
+    ips = await public_ips(force=True)
+    found = ", ".join(ip for ip in ips.values() if ip)
+    if found:
+        return _redirect_info(f"Dış IP adresi: {found}")
+    return _redirect_error("Dış IP adresi belirlenemedi.")
 
 @app.post("/servers/{name}/test")
 async def test_server(name: str, request: Request):
