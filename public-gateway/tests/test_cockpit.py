@@ -54,7 +54,7 @@ async def test_command_not_found(cockpit):
     async with session(cockpit) as s:
         r = await s.spawn(["missing"])
     assert r.exit_status is None
-    assert r.stderr == "Cockpit hatası: not-found (komut bulunamadı)"
+    assert r.stderr == "Cockpit error: not-found (command not found)"
 
 
 async def test_superuser(cockpit):
@@ -68,7 +68,7 @@ async def test_superuser_denied_without_sudo(cockpit):
     async with session(cockpit, user="plain") as s:
         r = await s.spawn(["id", "-u"], superuser=True)
     assert r.exit_status is None
-    assert "yönetici yetkisi alınamadı" in r.stderr
+    assert "could not obtain administrator privileges" in r.stderr
 
 
 async def test_parallel_spawns_on_one_session(cockpit):
@@ -81,17 +81,17 @@ async def test_timeout(cockpit):
     async with session(cockpit) as s:
         r = await s.spawn(["sleep", "100"], timeout=0.2)
     assert r.exit_status is None
-    assert "zaman aşımına uğradı" in r.stderr
+    assert "timed out" in r.stderr
 
 
 async def test_wrong_password(cockpit):
-    with pytest.raises(cockpit_client.CockpitError, match="girişi reddedildi"):
+    with pytest.raises(cockpit_client.CockpitError, match="login rejected"):
         await session(cockpit, password=WRONG_PASSWORD).connect()
 
 
 async def test_unreachable():
     s = cockpit_client.CockpitSession("http://127.0.0.1:1", "admin", PASSWORD, connect_timeout=2)
-    with pytest.raises(cockpit_client.CockpitError, match="bağlanılamadı"):
+    with pytest.raises(cockpit_client.CockpitError, match="Could not connect"):
         await s.connect()
 
 
@@ -163,7 +163,7 @@ async def test_falls_back_to_ssh_when_cockpit_unreachable(servers_file, ssh):
     servers_file(cockpit_server("http://127.0.0.1:1"))
     text = (await call("run_remote_command", {"server_name": "box", "command": "uptime", "confirm": True})).content[0].text
     assert "Via: ssh" in text
-    assert "Cockpit kullanılamadı" in text
+    assert "Cockpit was unavailable" in text
     assert ssh == ["uptime"]
 
 
@@ -171,7 +171,7 @@ async def test_falls_back_to_ssh_on_wrong_password(cockpit, servers_file, ssh):
     servers_file(cockpit_server(cockpit.url, password=WRONG_PASSWORD))
     data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
     assert data["connection"]["via"] == "ssh"
-    assert "girişi reddedildi" in data["connection"]["cockpit_error"]
+    assert "login rejected" in data["connection"]["cockpit_error"]
 
 
 async def test_cockpit_and_ssh_both_fail(servers_file, monkeypatch, ssh_dirs):
@@ -181,8 +181,8 @@ async def test_cockpit_and_ssh_both_fail(servers_file, monkeypatch, ssh_dirs):
     monkeypatch.setattr(main.asyncssh, "connect", refuse)
     servers_file(cockpit_server("http://127.0.0.1:1"))
     text = (await call("server_info", {"server_name": "box"})).content[0].text
-    assert "Cockpit'e bağlanılamadı" in text
-    assert "SSH yedeği de başarısız" in text
+    assert "Could not connect to Cockpit" in text
+    assert "SSH fallback also failed" in text
 
 
 async def test_undecryptable_password_falls_back(cockpit, servers_file, ssh):
@@ -191,7 +191,7 @@ async def test_undecryptable_password_falls_back(cockpit, servers_file, ssh):
     servers_file(cfg)
     data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
     assert data["connection"]["via"] == "ssh"
-    assert "şifresi çözülemedi" in data["connection"]["cockpit_error"]
+    assert "password could not be decrypted" in data["connection"]["cockpit_error"]
     assert cockpit.fake.logins == []
 
 
@@ -294,7 +294,7 @@ async def test_tunnel_failure_falls_back_to_plain_ssh(servers_file, ssh):
     servers_file(cockpit_server("http://127.0.0.1:1"))
     text = (await call("run_remote_command", {"server_name": "box", "command": "uptime", "confirm": True})).content[0].text
     assert "Via: ssh" in text
-    assert "SSH tüneli üzerinden de olmadı" in text
+    assert "also failed over the SSH tunnel" in text
 
 
 async def test_check_server_reports_tunnel(cockpit, tunnel_ssh, ssh_dirs):

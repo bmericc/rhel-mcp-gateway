@@ -9,16 +9,16 @@ GATEWAY_URL = os.getenv("GATEWAY_URL", "ws://sizin-public-sunucu-ip:7435/ws/agen
 async def run_agent():
     while True:
         try:
-            print(f"[*] Gateway'e bağlanılıyor: {GATEWAY_URL}")
+            print(f"[*] Connecting to the gateway: {GATEWAY_URL}")
             async with websockets.connect(GATEWAY_URL) as websocket:
-                print("[✔] Gateway bağlantısı başarılı. Komut bekleniyor...")
+                print("[✔] Connected to the gateway. Waiting for commands...")
                 while True:
                     message = await websocket.recv()
                     data = json.loads(message)
                     cmd_id = data.get("id")
                     command = data.get("command")
                     
-                    print(f"[>] Komut çalıştırılıyor: {command}")
+                    print(f"[>] Running command: {command}")
                     
                     proc = await asyncio.create_subprocess_shell(
                         command,
@@ -35,7 +35,7 @@ async def run_agent():
                     }
                     await websocket.send(json.dumps(response))
         except Exception as e:
-            print(f"[!] Bağlantı hatası: {e}. 5 saniye sonra yeniden denenecek...")
+            print(f"[!] Connection error: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":

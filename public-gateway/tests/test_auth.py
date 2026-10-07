@@ -46,7 +46,7 @@ def test_web_login_success(cockpit, servers_file):
     assert resp.status_code == 303
     page = client.get("/")
     assert page.status_code == 200
-    assert "Hoş geldiniz, admin" in page.text
+    assert "Welcome, admin" in page.text
     # Sadece doğrulama için giriş: superuser köprüsü istenmez
     assert cockpit.fake.logins[-1] == {"user": "admin", "superuser": "none"}
 
@@ -55,7 +55,7 @@ def test_web_login_wrong_password(cockpit, servers_file):
     client = TestClient(main.app)
     resp = client.post("/login", data={"username": "admin", "password": WRONG_PASSWORD})
     assert resp.status_code == 401
-    assert "Kullanıcı adı veya şifre hatalı" in resp.text
+    assert "Wrong username or password" in resp.text
     assert client.get("/", follow_redirects=False).status_code == 303
 
 
@@ -63,14 +63,14 @@ def test_web_login_cockpit_unreachable(monkeypatch, servers_file):
     monkeypatch.setattr(main.authenticator, "url", "http://127.0.0.1:1")
     resp = TestClient(main.app).post("/login", data={"username": "admin", "password": PASSWORD})
     assert resp.status_code == 401
-    assert "Cockpit&#x27;e ulaşılamadı" in resp.text
+    assert "Could not reach Cockpit" in resp.text
 
 
 def test_web_login_respects_allowed_users(cockpit, monkeypatch, servers_file):
     monkeypatch.setattr(main.authenticator, "allowed_users", {"plain"})
     resp = TestClient(main.app).post("/login", data={"username": "admin", "password": PASSWORD})
     assert resp.status_code == 401
-    assert "erişim yetkisi yok" in resp.text
+    assert "not allowed to access the gateway" in resp.text
 
 
 # --- /sse kimlik doğrulama ---
@@ -193,7 +193,7 @@ def test_oauth_wrong_password_stays_on_login(cockpit, provider):
     client = TestClient(main.app)
     _, _, request_id, resp = oauth_flow(client, password=WRONG_PASSWORD)
     assert resp.status_code == 401
-    assert "Kullanıcı adı veya şifre hatalı" in resp.text
+    assert "Wrong username or password" in resp.text
     # Aynı istekle doğru şifre denenebilir
     ok = client.post("/oauth/login", data={"request": request_id, "username": "admin", "password": PASSWORD},
                      follow_redirects=False)
@@ -261,7 +261,7 @@ def test_web_login_asks_for_token(cockpit, login_token, servers_file):
     logins = len(cockpit.fake.logins)
     resp = client.post("/login", data={"username": "admin", "password": PASSWORD})
     assert resp.status_code == 401
-    assert "Gateway parolası hatalı" in resp.text
+    assert "Wrong gateway password" in resp.text
     # Token yanlışsa şifre Cockpit'e hiç gönderilmez
     assert len(cockpit.fake.logins) == logins
 
@@ -276,7 +276,7 @@ def test_web_login_asks_for_token(cockpit, login_token, servers_file):
 def test_web_login_token_from_url(cockpit, login_token, servers_file):
     client = TestClient(main.app)
     page = client.get("/login", params={"token": LOGIN_TOKEN}).text
-    assert "Gateway parolası" not in page
+    assert "Gateway password" not in page
     assert f"name='token' value='{LOGIN_TOKEN}'" in page
     # URL'deki token yanlışsa form yine sorar
     assert 'name="token"' in client.get("/login", params={"token": "yanlis-xxx"}).text
@@ -297,7 +297,7 @@ def test_oauth_uses_token_from_connection_url(cockpit, provider, login_token):
     client = TestClient(main.app)
     resource = f"{main.MCP_RESOURCE_URL}?token={LOGIN_TOKEN}"
     _, _, _, resp = oauth_flow(client, resource=resource)
-    assert "Gateway parolası" not in client.last_login_page
+    assert "Gateway password" not in client.last_login_page
     assert resp.status_code == 302
     assert "code=" in resp.headers["location"]
 

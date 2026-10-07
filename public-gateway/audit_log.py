@@ -18,7 +18,7 @@ MAX_FIELD_CHARS = 4000
 
 def clip(value: Any, limit: int = MAX_FIELD_CHARS) -> Any:
     if isinstance(value, str) and len(value) > limit:
-        return value[:limit] + f"… [kırpıldı, toplam {len(value)} karakter]"
+        return value[:limit] + f"… [truncated, {len(value)} characters total]"
     if isinstance(value, dict):
         return {k: clip(v, limit) for k, v in value.items()}
     if isinstance(value, list):
@@ -48,7 +48,7 @@ def record(source: str, action: str, status: str = "ok", **fields: Any) -> None:
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     except OSError as e:
-        print(f"audit log yazılamadı: {e}", file=sys.stderr)
+        print(f"could not write audit log: {e}", file=sys.stderr)
 
 
 def _lines_newest_first():

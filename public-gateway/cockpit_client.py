@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import outbound_proxy
 
 from fleet_tools import CommandResult
+from i18n import t
 
 
 class CockpitError(Exception):
@@ -84,11 +85,11 @@ class CockpitSession:
                     headers=headers,
                 )
         except httpx.HTTPError as e:
-            raise CockpitError(f"Cockpit'e bağlanılamadı ({self.url}): {_describe(e)}") from e
+            raise CockpitError(t("Could not connect to Cockpit ({url}): {reason}", url=self.url, reason=_describe(e))) from e
         if resp.status_code == 401:
-            raise CockpitAuthError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
+            raise CockpitAuthError(t("Cockpit login rejected ({user}@{url})", user=self.user, url=self.url))
         if resp.status_code != 200 or "cockpit" not in resp.cookies:
-            raise CockpitError(f"Cockpit girişi başarısız ({self.url}): HTTP {resp.status_code}")
+            raise CockpitError(t("Cockpit login failed ({url}): HTTP {status}", url=self.url, status=resp.status_code))
         return resp.cookies["cockpit"]
 
     async def _login_via_proxy(self, headers: dict) -> str:
@@ -100,14 +101,14 @@ class CockpitSession:
                 ssl_context=self._ssl_context(), timeout=self.connect_timeout,
             )
         except outbound_proxy.ProxyError as e:
-            raise CockpitError(f"Cockpit'e proxy üzerinden bağlanılamadı ({self.url}): {e}") from e
+            raise CockpitError(t("Could not connect to Cockpit through the proxy ({url}): {reason}", url=self.url, reason=e)) from e
         if status == 401:
-            raise CockpitAuthError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
+            raise CockpitAuthError(t("Cockpit login rejected ({user}@{url})", user=self.user, url=self.url))
         for name, value in resp_headers:
             if name.lower() == "set-cookie" and value.startswith("cockpit="):
                 if status == 200:
                     return value.split(";", 1)[0][len("cockpit="):]
-        raise CockpitError(f"Cockpit girişi başarısız ({self.url}): HTTP {status}")
+        raise CockpitError(t("Cockpit login failed ({url}): HTTP {status}", url=self.url, status=status))
 
     async def connect(self):
         cookie = await self.login()
@@ -132,16 +133,17 @@ class CockpitSession:
             init = await asyncio.wait_for(self._ws.recv(), self.connect_timeout)
         except Exception as e:
             await self.close()
-            raise CockpitError(f"Cockpit WebSocket bağlantısı kurulamadı ({ws_url}): {_describe(e)}") from e
+            raise CockpitError(t("Could not open the Cockpit WebSocket connection ({url}): {reason}",
+                                 url=ws_url, reason=_describe(e))) from e
 
         channel, payload = _split(init)
         message = json.loads(payload) if channel == "" else {}
         if message.get("command") != "init":
             await self.close()
-            raise CockpitError(f"Cockpit beklenmeyen ilk mesaj gönderdi: {payload[:200]}")
+            raise CockpitError(t("Cockpit sent an unexpected first message: {payload}", payload=payload[:200]))
         if message.get("problem"):
             await self.close()
-            raise CockpitError(f"Cockpit oturumu açılamadı: {message['problem']}")
+            raise CockpitError(t("Could not open the Cockpit session: {problem}", problem=message["problem"]))
 
         await self._send("", {"command": "init", "version": 1, "host": "localhost"})
         self._reader = asyncio.create_task(self._read_loop())
@@ -187,7 +189,7 @@ class CockpitSession:
         except Exception as e:
             self._fail_all(str(e))
             return
-        self._fail_all("bağlantı kapandı")
+        self._fail_all(t("connection closed"))
 
     def _fail_all(self, reason: str):
         self._closed_reason = reason
@@ -196,7 +198,7 @@ class CockpitSession:
 
     async def spawn(self, argv: list[str], superuser: bool = False, timeout: float = 60) -> CommandResult:
         if self._ws is None or self._closed_reason:
-            raise CockpitError(f"Cockpit bağlantısı kapalı: {self._closed_reason}")
+            raise CockpitError(t("Cockpit connection is closed: {reason}", reason=self._closed_reason))
 
         channel = f"mcp{next(self._ids)}"
         queue: asyncio.Queue = asyncio.Queue()
@@ -232,12 +234,12 @@ class CockpitSession:
             except asyncio.TimeoutError:
                 await self._send("", {"command": "close", "channel": channel})
                 return CommandResult(self.user, None, "".join(stdout),
-                                     f"Komut {timeout} saniyede zaman aşımına uğradı.", "cockpit")
+                                     t("Command timed out after {timeout} seconds.", timeout=timeout), "cockpit")
         finally:
             self._channels.pop(channel, None)
 
         if closing.get("problem") == "disconnected":
-            raise CockpitError(f"Cockpit bağlantısı koptu: {closing.get('message')}")
+            raise CockpitError(t("Cockpit connection lost: {message}", message=closing.get("message")))
 
         stderr = closing.get("message", "")
         problem = closing.get("problem")
@@ -245,24 +247,24 @@ class CockpitSession:
             exit_status = closing["exit-status"]
         elif "exit-signal" in closing:
             exit_status = None
-            stderr = (stderr + f"\nSinyal ile sonlandı: {closing['exit-signal']}").strip()
+            stderr = (stderr + "\n" + t("Terminated by signal: {signal}", signal=closing["exit-signal"])).strip()
         else:
             exit_status = None
         if problem:
             hint = {
-                "not-found": "komut bulunamadı",
-                "access-denied": "yetki reddedildi",
+                "not-found": t("command not found"),
+                "access-denied": t("access denied"),
             }.get(problem, "")
             if superuser and problem == "terminated":
-                hint = "yönetici yetkisi alınamadı (kullanıcının sudo yetkisi olmalı)"
-            stderr = (f"Cockpit hatası: {problem}" + (f" ({hint})" if hint else "") + (f"\n{stderr}" if stderr else ""))
+                hint = t("could not obtain administrator privileges (the user needs sudo rights)")
+            stderr = (t("Cockpit error: {problem}", problem=problem) + (f" ({hint})" if hint else "") + (f"\n{stderr}" if stderr else ""))
         return CommandResult(self.user, exit_status, "".join(stdout), stderr, "cockpit")
 
 
 def _describe(e: Exception) -> str:
     """Hata mesajı boş gelen istisnalar (örn. httpx.ConnectTimeout) için anlaşılır açıklama."""
     if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError, TimeoutError)):
-        return "zaman aşımı (port kapalı veya güvenlik duvarı engelliyor olabilir)"
+        return t("timed out (the port may be closed or blocked by a firewall)")
     return str(e) or type(e).__name__
 
 

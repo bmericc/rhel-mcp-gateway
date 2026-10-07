@@ -39,7 +39,7 @@ def client(monkeypatch, servers_file):
 
 def test_panel_shows_public_ip_and_firewall_example(client, fake_lookup):
     page = client.get("/").text
-    assert "Gateway dış IP adresi: <code>203.0.113.7</code>" in page
+    assert "Gateway public IP address: <code>203.0.113.7</code>" in page
     assert "source address=&quot;203.0.113.7&quot;" in page
     assert "9090/tcp" in page
 
@@ -67,7 +67,7 @@ async def test_result_is_cached(fake_lookup):
 def test_unknown_ip_shows_note_and_is_not_cached(client, fake_lookup):
     calls, answers = fake_lookup
     answers["https://api.ipify.org"] = None
-    assert "belirlenemedi" in client.get("/").text
+    assert "could not be determined" in client.get("/").text
     count = len(calls)
     client.get("/")
     assert len(calls) > count

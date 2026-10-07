@@ -64,15 +64,15 @@ def test_wrong_cockpit_password_is_not_saved(cockpit, client, ssh_dirs):
     location = resp.headers["location"]
     assert "error=" in location
     page = client.get(location).text
-    assert "kaydedilmedi" in page
-    assert "girişi reddedildi" in page
+    assert "was not saved" in page
+    assert "login rejected" in page
     assert main.load_servers() == {}
 
 
 def test_unreachable_cockpit_is_not_saved(client, ssh_dirs):
     resp = client.post("/servers", data=form("http://127.0.0.1:1"), follow_redirects=False)
     assert "error=" in resp.headers["location"]
-    assert "bağlanılamadı" in client.get(resp.headers["location"]).text
+    assert "Could not connect" in client.get(resp.headers["location"]).text
     assert main.load_servers() == {}
 
 
@@ -88,7 +88,7 @@ def test_skip_check_saves_without_connecting(cockpit, client):
     assert "info=" in resp.headers["location"]
     assert "srv" in main.load_servers()
     assert cockpit.fake.logins == []
-    assert "Test edilmedi" in client.get("/").text
+    assert "Not tested" in client.get("/").text
 
 
 def test_ssh_only_server_checked_over_ssh(client, monkeypatch, ssh_dirs):
@@ -148,7 +148,7 @@ def test_cockpit_down_but_ssh_works_is_warning(client, monkeypatch, servers_file
     client.post("/servers/srv/test", follow_redirects=False)
     check = main.load_servers()["srv"]["last_check"]
     assert check["ok"] is True and check["warning"] is True and check["via"] == "ssh"
-    assert "SSH yedeği ile bağlanıldı" in check["message"]
+    assert "Connected with the SSH fallback" in check["message"]
     # Boş hata mesajı yerine sebep yazılır
     assert not check["message"].rstrip().endswith("):")
     assert "⚠" in client.get("/").text

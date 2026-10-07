@@ -9,7 +9,7 @@ def test_index_requires_login():
     assert resp.status_code == 200
     assert 'action="/login"' in resp.text
     assert "Google" not in resp.text
-    assert "Hoş geldiniz" not in resp.text
+    assert "Welcome" not in resp.text
 
 
 def test_logout_redirects():

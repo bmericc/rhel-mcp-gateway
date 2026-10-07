@@ -26,6 +26,8 @@ import audit_log
 import cockpit_client
 import outbound_proxy
 import fleet_tools
+import i18n
+from i18n import N, t
 
 # MCP Kütüphaneleri
 from mcp.server import Server
@@ -51,6 +53,8 @@ app.add_middleware(
     SessionMiddleware, 
     secret_key=SECRET_KEY
 )
+# Interface language from the browser's Accept-Language header (English by default)
+app.add_middleware(i18n.LanguageMiddleware)
 
 SERVERS_FILE = "data/servers.json"
 OAUTH_STORE_FILE = "data/oauth.json"
@@ -120,7 +124,7 @@ def public_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # IP adresini görür. Sunucu bazında farklı bir proxy ya da "direct" (proxysiz) seçilebilir.
 OUTBOUND_PROXY = os.getenv("OUTBOUND_PROXY", "").strip()
 
-PROXY_UNREADABLE = "Sunucunun proxy ayarı çözülemedi (SECRET_KEY değişmiş olabilir); panelden yeniden girin."
+PROXY_UNREADABLE = N("The server's proxy setting could not be decrypted (SECRET_KEY may have changed); re-enter it in the panel.")
 
 def server_proxy(cfg: Dict[str, Any]) -> str | None:
     """Sunucuya bağlanırken kullanılacak proxy adresi (None = doğrudan).
@@ -131,21 +135,21 @@ def server_proxy(cfg: Dict[str, Any]) -> str | None:
     if cfg.get("proxy"):
         stored = decrypt_secret(cfg["proxy"])
         if stored is None:
-            raise outbound_proxy.ProxyError(PROXY_UNREADABLE)
+            raise outbound_proxy.ProxyError(t(PROXY_UNREADABLE))
         return None if stored == "direct" else stored
     return OUTBOUND_PROXY or None
 
 def proxy_label(cfg: Dict[str, Any]) -> str:
     stored = decrypt_secret(cfg["proxy"]) if cfg.get("proxy") else None
     if cfg.get("proxy") and stored is None:
-        return "proxy ayarı çözülemedi"
+        return t("proxy setting unreadable")
     if stored == "direct":
-        return "doğrudan"
+        return t("direct")
     if stored:
         return f"proxy {outbound_proxy.redact(stored)}"
     if OUTBOUND_PROXY:
-        return f"proxy {outbound_proxy.redact(OUTBOUND_PROXY)} (varsayılan)"
-    return "doğrudan"
+        return t("proxy {proxy} (default)", proxy=outbound_proxy.redact(OUTBOUND_PROXY))
+    return t("direct")
 
 def cockpit_url(cfg: Dict[str, Any]) -> str:
     return cfg.get("cockpit_url") or f"https://{cfg['host']}:9090"
@@ -200,15 +204,15 @@ def shared_key_entry(name: str, key: "asyncssh.SSHKey") -> Dict[str, Any]:
 
 def import_shared_key(name: str, private_text: str, passphrase: str = "") -> Dict[str, Any]:
     if len(private_text) > MAX_KEY_SIZE:
-        raise ValueError("Anahtar çok büyük.")
+        raise ValueError(t("The key is too large."))
     try:
         key = asyncssh.import_private_key(private_text.strip() + "\n", passphrase or None)
     except asyncssh.KeyEncryptionError:
-        raise ValueError("Anahtarın parolası hatalı.")
+        raise ValueError(t("Wrong key passphrase."))
     except asyncssh.KeyImportError as e:
         if "Passphrase" in str(e):
-            raise ValueError("Bu anahtar parolalı; anahtar parolasını da girin.")
-        raise ValueError("Geçerli bir SSH özel anahtarı değil (açık anahtar değil, özel anahtar yapıştırın).")
+            raise ValueError(t("This key is passphrase-protected; enter the key passphrase too."))
+        raise ValueError(t("Not a valid SSH private key (paste the private key, not the public key)."))
     return shared_key_entry(name, key)
 
 def shared_client_keys() -> list:
@@ -262,12 +266,12 @@ async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_
     """
     candidates = login_candidates(cfg)
     if not candidates:
-        raise SSHError(f"Hata: '{cfg.get('name', cfg.get('host'))}' için kullanılabilir SSH key bulunamadı.")
+        raise SSHError(t("Error: no usable SSH key found for '{name}'.", name=cfg.get("name", cfg.get("host"))))
 
     try:
         proxy = server_proxy(cfg)
     except outbound_proxy.ProxyError as e:
-        raise SSHError(f"SSH Bağlantı Hatası: {e}") from e
+        raise SSHError(t("SSH connection error: {reason}", reason=e)) from e
     denied = []
     for user, keys in candidates:
         try:
@@ -292,15 +296,15 @@ async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_
             continue
         except Exception as e:
             # Ağ/bağlantı hatasında diğer kullanıcıları denemenin anlamı yok
-            reason = "bağlantı zaman aşımına uğradı" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else (str(e) or type(e).__name__)
-            raise SSHError(f"SSH Bağlantı Hatası: {reason}") from e
+            reason = t("connection timed out") if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else (str(e) or type(e).__name__)
+            raise SSHError(t("SSH connection error: {reason}", reason=reason)) from e
         try:
             yield user, conn
         finally:
             await cm.__aexit__(None, None, None)
         return
 
-    raise SSHError("SSH Kimlik Doğrulama Hatası, denenen kullanıcılar:\n" + "\n".join(denied))
+    raise SSHError(t("SSH authentication failed, users tried:") + "\n" + "\n".join(denied))
 
 # --- İşlem kaydı (audit log) bağlamı ---
 # MCP bağlantısını açan kullanıcı; /sse isteğinde atanır, araç çağrıları aynı bağlamı devralır.
@@ -339,7 +343,7 @@ def make_runner(user: str, conn) -> fleet_tools.Runner:
         try:
             result = await asyncio.wait_for(conn.run(command, check=False), timeout)
         except asyncio.TimeoutError:
-            return fleet_tools.CommandResult(user, None, "", f"Komut {timeout} saniyede zaman aşımına uğradı.", "ssh")
+            return fleet_tools.CommandResult(user, None, "", t("Command timed out after {timeout} seconds.", timeout=timeout), "ssh")
         return fleet_tools.CommandResult(user, result.exit_status, result.stdout or "", result.stderr or "", "ssh")
     return _recorded(run)
 
@@ -361,7 +365,7 @@ def _cockpit_down_key(cfg: Dict[str, Any]) -> str:
 def cockpit_password(cfg: Dict[str, Any]) -> str | None:
     return decrypt_secret(cfg.get("cockpit_password", ""))
 
-COCKPIT_PASSWORD_UNREADABLE = "Cockpit şifresi çözülemedi (şifre girilmemiş ya da SECRET_KEY değişmiş olabilir)."
+COCKPIT_PASSWORD_UNREADABLE = N("The Cockpit password could not be decrypted (no password was entered, or SECRET_KEY may have changed).")
 
 async def connect_cockpit_direct(cfg: Dict[str, Any], password: str,
                                  connect_timeout: float = 10) -> cockpit_client.CockpitSession:
@@ -421,7 +425,7 @@ async def open_runner(cfg: Dict[str, Any]):
     if cfg.get("cockpit_user"):
         password = cockpit_password(cfg)
         if password is None:
-            cockpit_error = COCKPIT_PASSWORD_UNREADABLE
+            cockpit_error = t(COCKPIT_PASSWORD_UNREADABLE)
         elif (down := cockpit_recently_down(cfg)) is not None:
             cockpit_error = down
         else:
@@ -447,7 +451,8 @@ async def open_runner(cfg: Dict[str, Any]):
                 try:
                     session = await stack.enter_async_context(cockpit_over_ssh(cfg, conn, password))
                 except Exception as e:
-                    cockpit_error = f"{cockpit_error}; SSH tüneli üzerinden de olmadı: {str(e) or type(e).__name__}"
+                    cockpit_error = t("{error}; also failed over the SSH tunnel: {reason}",
+                                      error=cockpit_error, reason=str(e) or type(e).__name__)
             if session is not None:
                 yield make_cockpit_runner(session), {"via": "cockpit-ssh", "user": cfg["cockpit_user"], "ssh_user": user}
                 return
@@ -457,7 +462,7 @@ async def open_runner(cfg: Dict[str, Any]):
             yield make_runner(user, conn), info
     except SSHError as e:
         if cockpit_error:
-            raise SSHError(f"{cockpit_error}\nSSH yedeği de başarısız: {e}") from e
+            raise SSHError(t("{error}\nSSH fallback also failed: {reason}", error=cockpit_error, reason=e)) from e
         raise
 
 def text_result(value: Any) -> list[types.TextContent]:
@@ -466,37 +471,38 @@ def text_result(value: Any) -> list[types.TextContent]:
 # --- MCP Sunucu Tanımları ---
 mcp_server = Server("rhel-fleet-gateway")
 
-SERVER_NAME_PROP = {"server_name": {"type": "string", "description": "Kayıtlı sunucu adı (örn: prod-db)"}}
+def server_name_prop() -> dict:
+    return {"server_name": {"type": "string", "description": t("Registered server name (e.g. prod-db)")}}
 
 @mcp_server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     return [
         types.Tool(
             name="list_servers",
-            description="Kayıtlı tüm RHEL sunucularını (şifreler hariç) ve Cockpit girişi tanımlı olup olmadığını listeler.",
+            description=t("Lists all registered RHEL servers (without passwords) and whether a Cockpit login is configured."),
             inputSchema={"type": "object", "properties": {}},
             annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
         ),
         types.Tool(
             name="fleet_health",
-            description="Tüm kayıtlı sunucuların yük, çökmüş servis ve kök disk doluluğu özetini paralel olarak toplar.",
+            description=t("Collects a load, failed-service and root-disk-usage summary from all registered servers in parallel."),
             inputSchema={"type": "object", "properties": {}},
             annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
         ),
         *[spec.to_tool() for spec in fleet_tools.TOOLS],
         types.Tool(
             name="run_remote_command",
-            description=(
-                "Kayıtlı bir sunucuda serbest bir Linux komutu çalıştırır. Amaca özel bir araç varsa onu tercih edin. "
-                "Sunucuya Cockpit girişi tanımlıysa Cockpit üzerinden, değilse veya Cockpit'e ulaşılamazsa SSH ile çalışır."
+            description=t(
+                "Runs an arbitrary Linux command on a registered server. Prefer a purpose-built tool when one exists. "
+                "Runs through Cockpit if the server has a Cockpit login configured; otherwise, or if Cockpit is unreachable, over SSH."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    **SERVER_NAME_PROP,
-                    "command": {"type": "string", "description": "Çalıştırılacak Linux komutu (örn: systemctl status nginx)"},
-                    "as_root": {"type": "boolean", "description": "Yönetici yetkisiyle çalıştır (Cockpit superuser / SSH'ta sudo -n)"},
-                    "confirm": {"type": "boolean", "description": "Komutu gerçekten çalıştırmak için true. Verilmezse sadece ne çalıştırılacağı gösterilir."},
+                    **server_name_prop(),
+                    "command": {"type": "string", "description": t("Linux command to run (e.g. systemctl status nginx)")},
+                    "as_root": {"type": "boolean", "description": t("Run with administrator privileges (Cockpit superuser / sudo -n over SSH)")},
+                    "confirm": {"type": "boolean", "description": t("Set to true to actually run the command. Otherwise only what would be run is shown.")},
                 },
                 "required": ["server_name", "command"]
             },
@@ -505,10 +511,11 @@ async def handle_list_tools() -> list[types.Tool]:
     ]
 
 def confirmation_required(server_name: str, action: str) -> list[types.TextContent]:
-    return text_result(
-        f"Onay gerekli: '{server_name}' üzerinde şu işlem yapılacak:\n  {action}\n"
-        "Uygulamak için aynı aracı confirm: true ile tekrar çağırın."
-    )
+    return text_result(t(
+        "Confirmation required: the following will be done on '{server}':\n  {action}\n"
+        "Call the same tool again with confirm: true to apply.",
+        server=server_name, action=action,
+    ))
 
 async def fleet_health(servers: Dict[str, Dict[str, Any]]) -> dict:
     async def one(cfg):
@@ -560,11 +567,11 @@ async def _call_tool(name: str, arguments: dict) -> tuple[list[types.TextContent
 
     spec = fleet_tools.TOOLS_BY_NAME.get(name)
     if spec is None and name != "run_remote_command":
-        raise ValueError(f"Bilinmeyen araç: {name}")
+        raise ValueError(t("Unknown tool: {name}", name=name))
 
     server_name = arguments.get("server_name")
     if server_name not in servers:
-        return text_result(f"Hata: '{server_name}' sunucusu hafızada bulunamadı."), "error"
+        return text_result(t("Error: server '{name}' not found.", name=server_name)), "error"
     cfg = servers[server_name]
 
     try:
@@ -576,7 +583,7 @@ async def _call_tool(name: str, arguments: dict) -> tuple[list[types.TextContent
                 result = await run(command, privileged=bool(arguments.get("as_root")))
             output = f"User: {result.user}\nVia: {result.via}\nExit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
             if info.get("cockpit_error"):
-                output = f"Not: Cockpit kullanılamadı, SSH ile çalıştırıldı ({info['cockpit_error']})\n" + output
+                output = t("Note: Cockpit was unavailable, ran over SSH ({error})", error=info["cockpit_error"]) + "\n" + output
             return text_result(output), "ok"
 
         if not spec.read_only and not arguments.get("confirm"):
@@ -628,9 +635,9 @@ PAGE_STYLE = f"""
 
 # Üst menü: (anahtar, adres, etiket)
 NAV_ITEMS = [
-    ("servers", "/", "Sunucular"),
-    ("ssh-keys", "/#ssh-keys", "SSH Anahtarları"),
-    ("logs", "/logs", "İşlem Kayıtları"),
+    ("servers", "/", N("Servers")),
+    ("ssh-keys", "/#ssh-keys", N("SSH Keys")),
+    ("logs", "/logs", N("Audit Log")),
 ]
 
 def navbar(user: str | None, active: str = "") -> str:
@@ -638,18 +645,18 @@ def navbar(user: str | None, active: str = "") -> str:
     menu = ""
     if user:
         links = "".join(
-            f'<li class="nav-item"><a class="nav-link{" active" if key == active else ""}" href="{href}">{label}</a></li>'
+            f'<li class="nav-item"><a class="nav-link{" active" if key == active else ""}" href="{href}">{t(label)}</a></li>'
             for key, href, label in NAV_ITEMS
         )
         menu = f"""
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topnav"
-            aria-controls="topnav" aria-expanded="false" aria-label="Menü">
+            aria-controls="topnav" aria-expanded="false" aria-label="{t('Menu')}">
       <span class="navbar-toggler-icon"></span>
     </button>
     <div class="collapse navbar-collapse" id="topnav">
       <ul class="navbar-nav me-auto">{links}</ul>
       <span class="navbar-text me-3">{html.escape(user)}</span>
-      <a class="btn btn-sm btn-outline-light" href="/logout">Çıkış Yap</a>
+      <a class="btn btn-sm btn-outline-light" href="/logout">{t('Log out')}</a>
     </div>"""
     return f"""<nav class="navbar navbar-expand-md navbar-dark bg-dark mb-4">
   <div class="container">
@@ -661,7 +668,7 @@ def render_page(title: str, body: str, status_code: int = 200, user: str | None 
                 active: str = "") -> HTMLResponse:
     """Tüm panel sayfaları için ortak HTML iskeleti (başlık, karakter seti, stil, üst menü)."""
     return HTMLResponse(f"""<!doctype html>
-<html lang="tr">
+<html lang="{i18n.get_language()}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -678,14 +685,13 @@ def render_page(title: str, body: str, status_code: int = 200, user: str | None 
 </html>""", status_code=status_code)
 
 def forbidden() -> HTMLResponse:
-    return render_page("Yetkiniz yok", "<h2 class='h4'>Yetkiniz yok</h2><p><a class='btn btn-primary' href='/login'>Giriş yap</a></p>", 403)
+    title = t("Access denied")
+    return render_page(title, f"<h2 class='h4'>{title}</h2><p><a class='btn btn-primary' href='/login'>{t('Log in')}</a></p>", 403)
 
 def invalid_login_request() -> HTMLResponse:
-    return render_page(
-        "Giriş isteği geçersiz",
-        "<h2 class='h4'>Giriş isteği geçersiz</h2><p>Giriş isteği geçersiz veya süresi dolmuş. MCP istemcisinden tekrar bağlanın.</p>",
-        400,
-    )
+    title = t("Invalid login request")
+    detail = t("The login request is invalid or has expired. Connect again from the MCP client.")
+    return render_page(title, f"<h2 class='h4'>{title}</h2><p>{detail}</p>", 400)
 
 CHECK_TIMEOUT = 10
 
@@ -743,26 +749,27 @@ def public_ip_html(ips: Dict[str, str | None], proxy_ips: Dict[str, str | None] 
     proxy_html = ""
     if OUTBOUND_PROXY:
         via = [ip for ip in ((proxy_ips or {}).get("ipv4"), (proxy_ips or {}).get("ipv6")) if ip]
-        shown = " ".join(f"<code>{html.escape(ip)}</code>" for ip in via) or "<span class='err'>belirlenemedi</span>"
-        proxy_html = (f"<p>Varsayılan proxy ({html.escape(outbound_proxy.redact(OUTBOUND_PROXY))}) çıkış IP adresi: "
-                      f"{shown}<br><span class='note'>Proxy kullanan sunucular bu adresi görür; "
-                      f"onlarda bu adrese izin verin.</span></p>")
+        shown = " ".join(f"<code>{html.escape(ip)}</code>" for ip in via) or f"<span class='err'>{t('could not be determined')}</span>"
+        label = t("Default proxy ({proxy}) egress IP address:", proxy=html.escape(outbound_proxy.redact(OUTBOUND_PROXY)))
+        proxy_html = (f"<p>{label} {shown}<br><span class='note'>"
+                      f"{t('Servers that use the proxy see this address; allow this address on them.')}</span></p>")
     found = [ip for ip in (ips.get("ipv4"), ips.get("ipv6")) if ip]
     if not found:
-        return proxy_html + ("<p class='note'>Gateway'in dış IP adresi belirlenemedi "
-                             "(dışarıya erişim kapalı olabilir).</p>")
+        return proxy_html + "<p class='note'>" + t(
+            "The gateway's public IP address could not be determined (outbound access may be blocked).") + "</p>"
     codes = " ".join(f"<code>{html.escape(ip)}</code>" for ip in found)
     v4 = ips.get("ipv4")
     example = ""
     if v4:
         rule = (f"firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" source address=\"{v4}\" "
                 f"port port=\"9090\" protocol=\"tcp\" accept' && firewall-cmd --reload")
-        example = f"<br>Örnek (RHEL, firewalld): <code>{html.escape(rule)}</code>"
+        example = f"<br>{t('Example (RHEL, firewalld):')} <code>{html.escape(rule)}</code>"
+    note = t("On remote servers, allow this address for Cockpit (9090/tcp) and 22/tcp for the SSH fallback. "
+             "Servers on the same local network see the local IP address of the machine running the gateway instead.")
     return proxy_html + (
-        f"<p>Gateway dış IP adresi: {codes} "
-        f"<form method='post' action='/public-ip/refresh' style='display:inline'><button class='btn btn-sm btn-outline-secondary'>Yenile</button></form><br>"
-        f"<span class='note'>Uzaktaki sunucularda bu adrese Cockpit (9090/tcp) ve SSH yedeği için 22/tcp izni verin. "
-        f"Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.{example}</span></p>"
+        f"<p>{t('Gateway public IP address:')} {codes} "
+        f"<form method='post' action='/public-ip/refresh' style='display:inline'><button class='btn btn-sm btn-outline-secondary'>{t('Refresh')}</button></form><br>"
+        f"<span class='note'>{note}{example}</span></p>"
     )
 
 async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -776,7 +783,7 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
     async def spawn_true(session) -> str | None:
         result = await session.spawn(["true"], timeout=CHECK_TIMEOUT)
         if result.exit_status != 0:
-            return f"Cockpit üzerinden komut çalıştırılamadı: {result.stderr.strip() or result.exit_status}"
+            return t("Could not run a command through Cockpit: {reason}", reason=result.stderr.strip() or result.exit_status)
         return None
 
     async def try_ssh(password: str | None) -> tuple[str | None, str | None]:
@@ -792,7 +799,7 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
                         tunnel_error = str(e) or type(e).__name__
                 result = await make_runner(user, conn)("true", timeout=CHECK_TIMEOUT)
             if result.exit_status != 0:
-                return f"SSH komutu başarısız: {result.stderr.strip() or result.exit_status}", tunnel_error
+                return t("SSH command failed: {reason}", reason=result.stderr.strip() or result.exit_status), tunnel_error
             return None, tunnel_error
         except Exception as e:
             return str(e), tunnel_error
@@ -801,7 +808,7 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
         password = cockpit_password(cfg)
         error = None
         if password is None:
-            error = "Cockpit şifresi çözülemedi; şifreyi yeniden girin."
+            error = t("The Cockpit password could not be decrypted; re-enter the password.")
         else:
             session = None
             try:
@@ -816,29 +823,30 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 if session is not None:
                     await session.close()
         if error is None:
-            return {"ok": True, "via": "cockpit", "message": "Cockpit bağlantısı başarılı.", "at": checked_at}
+            return {"ok": True, "via": "cockpit", "message": t("Cockpit connection successful."), "at": checked_at}
         ssh_error, tunnel_error = await try_ssh(password)
         if ssh_error is None and password is not None and tunnel_error is None:
             return {"ok": True, "via": "cockpit-ssh", "at": checked_at,
-                    "message": "Cockpit SSH tüneli üzerinden bağlandı (Cockpit portu dışarıya kapalı)."}
+                    "message": t("Connected to Cockpit over the SSH tunnel (the Cockpit port is not reachable from outside).")}
         if ssh_error is None:
             # MCP araçları da bu durumda SSH yedeğiyle çalışır: sunucu kullanılabilir, ama uyarı gösterilir
-            detail = f" SSH tüneliyle Cockpit: {tunnel_error}" if tunnel_error else ""
+            detail = " " + t("Cockpit over the SSH tunnel: {error}", error=tunnel_error) if tunnel_error else ""
             return {"ok": True, "warning": True, "via": "ssh",
-                    "message": f"SSH yedeği ile bağlanıldı; Cockpit çalışmıyor: {error}.{detail}", "at": checked_at}
-        return {"ok": False, "via": None, "message": f"{error} (SSH yedeği de çalışmıyor: {ssh_error})",
+                    "message": t("Connected with the SSH fallback; Cockpit is not working: {error}.", error=error) + detail,
+                    "at": checked_at}
+        return {"ok": False, "via": None, "message": t("{error} (the SSH fallback is not working either: {ssh_error})", error=error, ssh_error=ssh_error),
                 "at": checked_at}
 
     ssh_error, _ = await try_ssh(None)
     if ssh_error is None:
-        return {"ok": True, "via": "ssh", "message": "SSH bağlantısı başarılı.", "at": checked_at}
+        return {"ok": True, "via": "ssh", "message": t("SSH connection successful."), "at": checked_at}
     return {"ok": False, "via": None, "message": ssh_error, "at": checked_at}
 
 def server_row(cfg: Dict[str, Any]) -> str:
     e = lambda v: html.escape(str(v)) if v not in (None, "") else "—"
     name = cfg["name"]
     cockpit = f"{e(cfg['cockpit_user'])} @ {e(cockpit_url(cfg))}" if cfg.get("cockpit_user") else "—"
-    ssh = f"{e(cfg.get('user') or 'otomatik')} @ {e(cfg['host'])}:{e(cfg.get('port', 22))}"
+    ssh = f"{e(cfg.get('user') or t('automatic'))} @ {e(cfg['host'])}:{e(cfg.get('port', 22))}"
     check = cfg.get("last_check")
     if check:
         if not check.get("ok"):
@@ -850,13 +858,13 @@ def server_row(cfg: Dict[str, Any]) -> str:
         status = (f"<span class='{css}' title='{e(check.get('message'))}'>{mark} {e(check.get('message'))}</span>"
                   f"<br><span class='note'>{e(check.get('at'))}</span>")
     else:
-        status = "<span class='note'>Test edilmedi</span>"
+        status = f"<span class='note'>{t('Not tested')}</span>"
     quoted = html.escape(name)
     return (
         f"<tr><td><b>{e(name)}</b><br><span class='note'>{e(proxy_label(cfg))}</span></td><td>{cockpit}</td><td>{ssh}</td><td>{status}</td>"
-        f"<td><form method='post' action='/servers/{quoted}/test'><button class='btn btn-sm btn-outline-primary'>Test et</button></form> "
+        f"<td><form method='post' action='/servers/{quoted}/test'><button class='btn btn-sm btn-outline-primary'>{t('Test')}</button></form> "
         f"<form method='post' action='/servers/{quoted}/delete' "
-        f"onsubmit=\"return confirm('{quoted} silinsin mi?')\"><button class='btn btn-sm btn-outline-danger'>Sil</button></form></td></tr>"
+        f"onsubmit=\"return confirm('{t('Delete {name}?', name=quoted)}')\"><button class='btn btn-sm btn-outline-danger'>{t('Delete')}</button></form></td></tr>"
     )
 
 @app.get("/", response_class=HTMLResponse)
@@ -866,84 +874,93 @@ async def index(request: Request, error: str = "", info: str = ""):
         return RedirectResponse(url="/login", status_code=303)
 
     servers = load_servers()
-    rows = "".join(server_row(cfg) for cfg in servers.values()) or "<tr><td colspan='5'>Henüz tanımlı sunucu yok.</td></tr>"
+    rows = "".join(server_row(cfg) for cfg in servers.values()) or f"<tr><td colspan='5'>{t('No servers defined yet.')}</td></tr>"
     error_html = f"<div class='alert alert-danger'>{html.escape(error)}</div>" if error else ""
     info_html = f"<div class='alert alert-success'>{html.escape(info)}</div>" if info else ""
     key_rows = "".join(shared_key_row(k) for k in load_shared_keys().values()) or \
-        "<tr><td colspan='4'>Henüz ortak anahtar yok.</td></tr>"
+        f"<tr><td colspan='4'>{t('No shared keys yet.')}</td></tr>"
+    add_note = t(
+        "Saving with an existing name updates that server. If the password field is left empty, the current password is kept. "
+        "Before saving, the gateway connects to the server to verify the details; if no connection can be made, nothing is saved.")
+    default_proxy = "" if not OUTBOUND_PROXY else " = " + html.escape(outbound_proxy.redact(OUTBOUND_PROXY))
+    proxy_note = (
+        t("Cockpit and SSH connections go through this proxy; the server sees the proxy's IP address. "
+          "If left empty, the current setting is kept (a new server uses the default).")
+        + " <code>default</code>: " + t("the default (OUTBOUND_PROXY in .env{value})", value=default_proxy)
+        + ", <code>direct</code>: " + t("no proxy.") + " "
+        + t("A username/password can be given in the address (socks5://user:password@host:1080) and is stored encrypted.")
+    )
+    keys_note = t(
+        "The keys here are tried on all servers, for every user, in the SSH fallback. "
+        "To use one, add the public part of the key to <code>~/.ssh/authorized_keys</code> on the servers. "
+        "Private keys are stored encrypted in <code>data/ssh_keys.json</code> and are not shown in the panel.")
 
-    return render_page("Sunucular", f"""
+    return render_page(t("Servers"), f"""
         {info_html}{error_html}
         <div class="card mb-4"><div class="card-body">
-          <h2 class="h5">Hoş geldiniz, {html.escape(username)}!</h2>
-          <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
+          <h2 class="h5">{t("Welcome, {user}!", user=html.escape(username))}</h2>
+          <p>{t("MCP Gateway is active. SSE endpoint:")} <code>{html.escape(PUBLIC_URL)}/sse</code></p>
           {public_ip_html(await public_ips(), await public_ips(proxy=OUTBOUND_PROXY) if OUTBOUND_PROXY else None)}
         </div></div>
 
-        <div class="card mb-4"><div class="card-header">Kayıtlı Sunucular</div><div class="card-body">
+        <div class="card mb-4"><div class="card-header">{t("Registered Servers")}</div><div class="card-body">
         <div class="table-responsive"><table class="table table-sm table-bordered table-hover align-middle bg-body mb-0">
-          <tr><th>Ad</th><th>Cockpit</th><th>SSH (yedek)</th><th>Bağlantı durumu</th><th></th></tr>
+          <tr><th>{t("Name")}</th><th>Cockpit</th><th>{t("SSH (fallback)")}</th><th>{t("Connection status")}</th><th></th></tr>
           {rows}
         </table></div>
         </div></div>
 
-        <div class="card mb-4"><div class="card-header">Sunucu Ekle / Güncelle</div><div class="card-body">
-        <p class="note">Aynı adla kaydetmek mevcut sunucuyu günceller. Şifre alanı boş bırakılırsa mevcut şifre korunur.
-        Kaydetmeden önce sunucuya bağlanılıp bilgiler doğrulanır; bağlantı kurulamazsa kayıt yapılmaz.</p>
+        <div class="card mb-4"><div class="card-header">{t("Add / Update Server")}</div><div class="card-body">
+        <p class="note">{add_note}</p>
         <form class="add" method="post" action="/servers">
-          <label>Sunucu adı *</label><input class="form-control form-control-sm" name="name" required placeholder="prod-db">
-          <label>Host (IP / alan adı) *</label><input class="form-control form-control-sm" name="host" required placeholder="192.168.0.98">
+          <label>{t("Server name *")}</label><input class="form-control form-control-sm" name="name" required placeholder="prod-db">
+          <label>{t("Host (IP / domain name) *")}</label><input class="form-control form-control-sm" name="host" required placeholder="192.168.0.98">
           <fieldset class="border rounded p-3" style="grid-column: 1 / -1">
             <legend class="float-none w-auto px-2 fs-6 mb-0">Cockpit</legend>
             <div class="add">
-              <label>Cockpit kullanıcısı</label><input class="form-control form-control-sm" name="cockpit_user" placeholder="bmericc">
-              <label>Cockpit şifresi</label><input class="form-control form-control-sm" name="cockpit_password" type="password" autocomplete="new-password">
-              <label>Cockpit adresi</label><input class="form-control form-control-sm" name="cockpit_url" placeholder="https://HOST:9090 (boşsa)">
-              <label>TLS sertifikasını doğrula</label><input name="cockpit_verify_tls" type="checkbox" class="form-check-input">
+              <label>{t("Cockpit user")}</label><input class="form-control form-control-sm" name="cockpit_user" placeholder="bmericc">
+              <label>{t("Cockpit password")}</label><input class="form-control form-control-sm" name="cockpit_password" type="password" autocomplete="new-password">
+              <label>{t("Cockpit address")}</label><input class="form-control form-control-sm" name="cockpit_url" placeholder="{t("https://HOST:9090 (if empty)")}">
+              <label>{t("Verify TLS certificate")}</label><input name="cockpit_verify_tls" type="checkbox" class="form-check-input">
             </div>
           </fieldset>
           <fieldset class="border rounded p-3" style="grid-column: 1 / -1">
-            <legend class="float-none w-auto px-2 fs-6 mb-0">SSH (yedek)</legend>
+            <legend class="float-none w-auto px-2 fs-6 mb-0">{t("SSH (fallback)")}</legend>
             <div class="add">
-              <label>SSH kullanıcısı</label><input class="form-control form-control-sm" name="user" placeholder="boşsa SSH_LOGINS sırası">
-              <label>SSH portu</label><input class="form-control form-control-sm" name="port" type="number" value="22">
-              <label>SSH key yolu</label><input class="form-control form-control-sm" name="ssh_key_path" placeholder="boşsa kullanıcının .ssh klasörü">
+              <label>{t("SSH user")}</label><input class="form-control form-control-sm" name="user" placeholder="{t("SSH_LOGINS order if empty")}">
+              <label>{t("SSH port")}</label><input class="form-control form-control-sm" name="port" type="number" value="22">
+              <label>{t("SSH key path")}</label><input class="form-control form-control-sm" name="ssh_key_path" placeholder="{t("the user's .ssh folder if empty")}">
             </div>
           </fieldset>
           <fieldset class="border rounded p-3" style="grid-column: 1 / -1">
-            <legend class="float-none w-auto px-2 fs-6 mb-0">Bağlantı proxy'si</legend>
+            <legend class="float-none w-auto px-2 fs-6 mb-0">{t("Connection proxy")}</legend>
             <div class="add">
               <label>Proxy</label><input class="form-control form-control-sm" name="proxy" autocomplete="off"
                 placeholder="socks5://host:1080 · http://host:3128 · direct · default">
             </div>
-            <p class="note mt-2 mb-0">Cockpit ve SSH bağlantıları bu proxy üzerinden yapılır; sunucu proxy'nin IP adresini görür.
-            Boş bırakılırsa mevcut ayar korunur (yeni sunucuda varsayılan kullanılır).
-            <code>default</code>: varsayılan (.env'deki OUTBOUND_PROXY{'' if not OUTBOUND_PROXY else ' = ' + html.escape(outbound_proxy.redact(OUTBOUND_PROXY))}),
-            <code>direct</code>: proxysiz. Kullanıcı adı/parola adreste verilebilir (socks5://kullanici:parola@host:1080) ve şifreli saklanır.</p>
+            <p class="note mt-2 mb-0">{proxy_note}</p>
           </fieldset>
-          <label>Bağlantıyı test etmeden kaydet</label><input name="skip_check" type="checkbox" class="form-check-input">
-          <span></span><button type="submit" class="btn btn-primary">Kaydet</button>
+          <label>{t("Save without testing the connection")}</label><input name="skip_check" type="checkbox" class="form-check-input">
+          <span></span><button type="submit" class="btn btn-primary">{t("Save")}</button>
         </form>
         </div></div>
 
-        <div class="card mb-4" id="ssh-keys"><div class="card-header">Ortak SSH Anahtarları</div><div class="card-body">
-        <p class="note">Buradaki anahtarlar SSH yedeğinde tüm sunucularda, her kullanıcı için denenir.
-        Kullanmak için anahtarın açık kısmını sunuculardaki <code>~/.ssh/authorized_keys</code> dosyasına ekleyin.
-        Özel anahtarlar <code>data/ssh_keys.json</code> içinde şifreli saklanır ve panelde gösterilmez.</p>
+        <div class="card mb-4" id="ssh-keys"><div class="card-header">{t("Shared SSH Keys")}</div><div class="card-body">
+        <p class="note">{keys_note}</p>
         <div class="table-responsive"><table class="table table-sm table-bordered table-hover align-middle bg-body">
-          <tr><th>Ad</th><th>Tür / parmak izi</th><th>Açık anahtar (authorized_keys satırı)</th><th></th></tr>
+          <tr><th>{t("Name")}</th><th>{t("Type / fingerprint")}</th><th>{t("Public key (authorized_keys line)")}</th><th></th></tr>
           {key_rows}
         </table></div>
         <form class="add" method="post" action="/ssh-keys">
-          <label>Anahtar adı *</label><input class="form-control form-control-sm" name="name" required placeholder="ortak-anahtar">
-          <label>Özel anahtar *</label><textarea class="key form-control form-control-sm" name="private_key" rows="6" required
+          <label>{t("Key name *")}</label><input class="form-control form-control-sm" name="name" required placeholder="{t("shared-key")}">
+          <label>{t("Private key *")}</label><textarea class="key form-control form-control-sm" name="private_key" rows="6" required
             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-          <label>Anahtar parolası</label><input class="form-control form-control-sm" name="passphrase" type="password" autocomplete="off" placeholder="parolasızsa boş">
-          <span></span><button type="submit" class="btn btn-primary">Anahtarı ekle</button>
+          <label>{t("Key passphrase")}</label><input class="form-control form-control-sm" name="passphrase" type="password" autocomplete="off" placeholder="{t("empty if none")}">
+          <span></span><button type="submit" class="btn btn-primary">{t("Add key")}</button>
         </form>
         <form class="add" method="post" action="/ssh-keys/generate" style="margin-top:12px">
-          <label>Yeni anahtar üret</label><input class="form-control form-control-sm" name="name" required placeholder="anahtar adı">
-          <span></span><button type="submit" class="btn btn-outline-primary">Ed25519 anahtarı üret</button>
+          <label>{t("Generate a new key")}</label><input class="form-control form-control-sm" name="name" required placeholder="{t("key name")}">
+          <span></span><button type="submit" class="btn btn-outline-primary">{t("Generate Ed25519 key")}</button>
         </form>
         </div></div>
     """, user=username, active="servers")
@@ -963,18 +980,18 @@ async def save_server(request: Request):
 
     name, host = field("name"), field("host")
     if not SERVER_NAME_RE.match(name):
-        return _redirect_error("Sunucu adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir.")
+        return _redirect_error(t("The server name may only contain letters, digits, dots, underscores and hyphens."))
     if not HOST_RE.match(host):
-        return _redirect_error("Geçersiz host.")
+        return _redirect_error(t("Invalid host."))
     try:
         port = int(field("port") or 22)
         if not 1 <= port <= 65535:
             raise ValueError
     except ValueError:
-        return _redirect_error("Geçersiz SSH portu.")
+        return _redirect_error(t("Invalid SSH port."))
     cockpit_url_value = field("cockpit_url")
     if cockpit_url_value and not re.match(r"^https?://[^\s/]+(:\d+)?/?$", cockpit_url_value):
-        return _redirect_error("Cockpit adresi https://host:9090 biçiminde olmalı.")
+        return _redirect_error(t("The Cockpit address must look like https://host:9090."))
 
     servers = load_servers()
     existing = servers.get(name, {})
@@ -997,7 +1014,7 @@ async def save_server(request: Request):
         try:
             outbound_proxy.parse_proxy(proxy_value)
         except ValueError as e:
-            return _redirect_error(f"Geçersiz proxy: {e}")
+            return _redirect_error(t("Invalid proxy: {error}", error=e))
         cfg["proxy"] = encrypt_secret(proxy_value)
 
     if cfg.get("cockpit_user"):
@@ -1007,28 +1024,28 @@ async def save_server(request: Request):
         elif existing.get("cockpit_password"):
             cfg["cockpit_password"] = existing["cockpit_password"]
         else:
-            return _redirect_error("Cockpit kullanıcısı için şifre gerekli.")
+            return _redirect_error(t("A password is required for the Cockpit user."))
 
     if form.get("skip_check"):
         # Bilgiler test edilmedi: eski (başka ayarlara ait olabilecek) durum gösterilmesin
         servers[name] = cfg
         save_servers(servers)
-        audit_web(request, "server_save", server=name, args=public_server(cfg), result="Bağlantı testi yapılmadan kaydedildi.")
-        return _redirect_info(f"'{name}' bağlantı testi yapılmadan kaydedildi.")
+        audit_web(request, "server_save", server=name, args=public_server(cfg), result=t("Saved without a connection test."))
+        return _redirect_info(t("'{name}' saved without a connection test.", name=name))
 
     check = await check_server(cfg)
     audit_web(request, "server_save", "ok" if check["ok"] else "error", server=name, args=public_server(cfg),
               via=check.get("via"), result=check["message"])
     if not check["ok"]:
-        return _redirect_error(f"'{name}' kaydedilmedi, bağlantı kurulamadı: {check['message']}")
+        return _redirect_error(t("'{name}' was not saved, could not connect: {message}", name=name, message=check["message"]))
     cfg["last_check"] = check
     # Kontrol sürerken dosya değişmiş olabilir; en güncel hâli üzerine yaz
     servers = load_servers()
     servers[name] = cfg
     save_servers(servers)
     if check.get("warning"):
-        return _redirect_error(f"'{name}' kaydedildi. {check['message']}")
-    return _redirect_info(f"'{name}' kaydedildi. {check['message']}")
+        return _redirect_error(t("'{name}' saved.", name=name) + " " + check["message"])
+    return _redirect_info(t("'{name}' saved.", name=name) + " " + check["message"])
 
 @app.post("/public-ip/refresh")
 async def refresh_public_ip(request: Request):
@@ -1040,8 +1057,8 @@ async def refresh_public_ip(request: Request):
     found = ", ".join(ip for ip in ips.values() if ip)
     audit_web(request, "public_ip_refresh", "ok" if found else "error", result=found)
     if found:
-        return _redirect_info(f"Dış IP adresi: {found}")
-    return _redirect_error("Dış IP adresi belirlenemedi.")
+        return _redirect_info(t("Public IP address: {ips}", ips=found))
+    return _redirect_error(t("The public IP address could not be determined."))
 
 @app.post("/servers/{name}/test")
 async def test_server(name: str, request: Request):
@@ -1049,7 +1066,7 @@ async def test_server(name: str, request: Request):
         return forbidden()
     cfg = load_servers().get(name)
     if cfg is None:
-        return _redirect_error(f"'{name}' bulunamadı.")
+        return _redirect_error(t("'{name}' not found.", name=name))
     check = await check_server(cfg)
     audit_web(request, "server_test", "ok" if check["ok"] else "error", server=name,
               via=check.get("via"), result=check["message"])
@@ -1069,7 +1086,7 @@ async def delete_server(name: str, request: Request):
     removed = servers.pop(name, None)
     save_servers(servers)
     audit_web(request, "server_delete", "ok" if removed else "error", server=name,
-              result=None if removed else "Sunucu bulunamadı.")
+              result=None if removed else t("Server not found."))
     return RedirectResponse(url="/", status_code=303)
 
 def shared_key_row(entry: Dict[str, Any]) -> str:
@@ -1079,7 +1096,7 @@ def shared_key_row(entry: Dict[str, Any]) -> str:
         f"<td>{html.escape(entry.get('type', ''))}<br><span class='note'>{html.escape(entry.get('fingerprint', ''))}</span></td>"
         f"<td><textarea class='key form-control' rows='3' readonly onclick='this.select()'>{html.escape(entry.get('public', ''))}</textarea></td>"
         f"<td><form method='post' action='/ssh-keys/{name}/delete' "
-        f"onsubmit=\"return confirm('{name} anahtarı silinsin mi?')\"><button class='btn btn-sm btn-outline-danger'>Sil</button></form></td></tr>"
+        f"onsubmit=\"return confirm('{t('Delete key {name}?', name=name)}')\"><button class='btn btn-sm btn-outline-danger'>{t('Delete')}</button></form></td></tr>"
     )
 
 def _key_name(form) -> str | None:
@@ -1093,20 +1110,20 @@ async def add_shared_key(request: Request):
     form = await request.form()
     name = _key_name(form)
     if not name:
-        return _redirect_error("Anahtar adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir.")
+        return _redirect_error(t("The key name may only contain letters, digits, dots, underscores and hyphens."))
     keys = load_shared_keys()
     if name in keys:
         # Eski açık anahtar sunuculara dağıtılmış olabilir; yanlışlıkla üzerine yazılmasın
-        return _redirect_error(f"'{name}' adında bir anahtar zaten var. Değiştirmek için önce silin.")
+        return _redirect_error(t("A key named '{name}' already exists. Delete it first to replace it.", name=name))
     try:
         entry = import_shared_key(name, form.get("private_key") or "", form.get("passphrase") or "")
     except ValueError as e:
         audit_web(request, "ssh_key_add", "error", args={"name": name}, result=str(e))
-        return _redirect_error(f"Anahtar eklenmedi: {e}")
+        return _redirect_error(t("Key not added: {error}", error=e))
     keys[name] = entry
     save_shared_keys(keys)
     audit_web(request, "ssh_key_add", args={"name": name, "fingerprint": entry["fingerprint"]})
-    return _redirect_info(f"'{name}' anahtarı eklendi ({entry['fingerprint']}).")
+    return _redirect_info(t("Key '{name}' added ({fingerprint}).", name=name, fingerprint=entry["fingerprint"]))
 
 @app.post("/ssh-keys/generate")
 async def generate_shared_key(request: Request):
@@ -1115,15 +1132,15 @@ async def generate_shared_key(request: Request):
     form = await request.form()
     name = _key_name(form)
     if not name:
-        return _redirect_error("Anahtar adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir.")
+        return _redirect_error(t("The key name may only contain letters, digits, dots, underscores and hyphens."))
     keys = load_shared_keys()
     if name in keys:
-        return _redirect_error(f"'{name}' adında bir anahtar zaten var.")
+        return _redirect_error(t("A key named '{name}' already exists.", name=name))
     key = asyncssh.generate_private_key("ssh-ed25519", comment=f"rhel-mcp-gateway:{name}")
     keys[name] = shared_key_entry(name, key)
     save_shared_keys(keys)
     audit_web(request, "ssh_key_generate", args={"name": name, "fingerprint": keys[name]["fingerprint"]})
-    return _redirect_info(f"'{name}' anahtarı üretildi. Açık anahtarı sunuculardaki authorized_keys dosyasına ekleyin.")
+    return _redirect_info(t("Key '{name}' generated. Add the public key to the authorized_keys file on the servers.", name=name))
 
 @app.post("/ssh-keys/{name}/delete")
 async def delete_shared_key(name: str, request: Request):
@@ -1134,30 +1151,30 @@ async def delete_shared_key(name: str, request: Request):
     save_shared_keys(keys)
     audit_web(request, "ssh_key_delete", "ok" if removed else "error",
               args={"name": name, "fingerprint": (removed or {}).get("fingerprint")})
-    return _redirect_info(f"'{name}' anahtarı silindi.")
+    return _redirect_info(t("Key '{name}' deleted.", name=name))
 
 # --- İşlem kayıtları ---
 LOGS_PER_PAGE = 100
-LOG_STATUS = {"ok": ("✓", "ok"), "error": ("✗ hata", "err"), "preview": ("onay bekliyor", "warn")}
+LOG_STATUS = {"ok": ("✓", "ok"), "error": (N("✗ error"), "err"), "preview": (N("awaiting confirmation"), "warn")}
 
 def log_row(entry: Dict[str, Any]) -> str:
     e = lambda v: html.escape(str(v)) if v not in (None, "") else "—"
     mark, css = LOG_STATUS.get(entry.get("status"), (entry.get("status"), "note"))
     details = []
     if entry.get("args"):
-        details.append("<b>Parametreler</b><pre>" + html.escape(json.dumps(entry["args"], ensure_ascii=False, indent=2)) + "</pre>")
+        details.append(f"<b>{t('Parameters')}</b><pre>" + html.escape(json.dumps(entry["args"], ensure_ascii=False, indent=2)) + "</pre>")
     if entry.get("commands"):
         lines = "\n".join(
-            f"[{c.get('via')} · {c.get('user')}{' · root' if c.get('as_root') else ''} · çıkış {c.get('exit_status')}] {c.get('command')}"
+            f"[{c.get('via')} · {c.get('user')}{' · root' if c.get('as_root') else ''} · {t('exit')} {c.get('exit_status')}] {c.get('command')}"
             for c in entry["commands"]
         )
-        details.append("<b>Çalıştırılan komutlar</b><pre>" + html.escape(lines) + "</pre>")
+        details.append(f"<b>{t('Commands run')}</b><pre>" + html.escape(lines) + "</pre>")
     if entry.get("result"):
-        details.append("<b>Sonuç</b><pre>" + html.escape(str(entry["result"])) + "</pre>")
+        details.append(f"<b>{t('Result')}</b><pre>" + html.escape(str(entry["result"])) + "</pre>")
     if entry.get("commands"):
-        summary = f"{len(entry['commands'])} komut"
+        summary = t("{count} command(s)", count=len(entry["commands"]))
     else:
-        summary = e(entry["via"]) if entry.get("via") else "Ayrıntı"
+        summary = e(entry["via"]) if entry.get("via") else t("Details")
     if entry.get("duration_ms") is not None:
         summary += f" · {entry['duration_ms']} ms"
     detail_html = f"<details><summary>{summary}</summary>{''.join(details)}</details>" if details else "—"
@@ -1165,7 +1182,7 @@ def log_row(entry: Dict[str, Any]) -> str:
         f"<tr><td>{e(entry.get('at'))}</td>"
         f"<td>{e(entry.get('user'))}<br><span class='note'>{e(entry.get('ip'))}</span></td>"
         f"<td>{e(entry.get('source'))}</td><td><b>{e(entry.get('action'))}</b></td>"
-        f"<td>{e(entry.get('server'))}</td><td><span class='{css}'>{e(mark)}</span></td><td>{detail_html}</td></tr>"
+        f"<td>{e(entry.get('server'))}</td><td><span class='{css}'>{e(mark and t(mark))}</span></td><td>{detail_html}</td></tr>"
     )
 
 @app.get("/logs", response_class=HTMLResponse)
@@ -1177,7 +1194,7 @@ async def logs_page(request: Request, q: str = "", source: str = "", status: str
     page = max(page, 1)
     entries, has_more = audit_log.read(LOGS_PER_PAGE, (page - 1) * LOGS_PER_PAGE, q=q, source=source,
                                        status=status, user=user.strip(), server=server.strip())
-    rows = "".join(log_row(entry) for entry in entries) or "<tr><td colspan='7'>Kayıt yok.</td></tr>"
+    rows = "".join(log_row(entry) for entry in entries) or f"<tr><td colspan='7'>{t('No entries.')}</td></tr>"
     filters = {"q": q, "source": source, "status": status, "user": user, "server": server}
 
     def options(selected: str, choices: Dict[str, str]) -> str:
@@ -1189,25 +1206,28 @@ async def logs_page(request: Request, q: str = "", source: str = "", status: str
         return f"<a class='btn btn-sm btn-outline-secondary' href='/logs?{query}'>{label}</a>"
 
     nav = " ".join(filter(None, [
-        page_link(page - 1, "← Daha yeni") if page > 1 else "",
-        f"<span class='mx-2'>Sayfa {page}</span>",
-        page_link(page + 1, "Daha eski →") if has_more else "",
+        page_link(page - 1, t("← Newer")) if page > 1 else "",
+        f"<span class='mx-2'>{t('Page {page}', page=page)}</span>",
+        page_link(page + 1, t("Older →")) if has_more else "",
     ]))
-    return render_page("İşlem kayıtları", f"""
-        <h2 class="h4">İşlem kayıtları</h2>
-        <p class="note">MCP araç çağrıları, panel işlemleri ve girişler. En yeni kayıt üsttedir.
-        Kayıtlar <code>{html.escape(audit_log.LOG_FILE)}</code> dosyasında tutulur; şifreler ve anahtarlar kaydedilmez.</p>
+    logs_note = t(
+        "MCP tool calls, panel actions and logins. The newest entry is on top. "
+        "Entries are kept in <code>{file}</code>; passwords and keys are not recorded.",
+        file=html.escape(audit_log.LOG_FILE))
+    return render_page(t("Audit log"), f"""
+        <h2 class="h4">{t("Audit log")}</h2>
+        <p class="note">{logs_note}</p>
         <form class="row g-2 align-items-center mb-3" method="get" action="/logs">
-          <div class="col-md"><input class="form-control form-control-sm" name="q" value="{html.escape(q)}" placeholder="Ara (komut, araç, çıktı…)"></div>
-          <div class="col-6 col-md-2"><input class="form-control form-control-sm" name="user" value="{html.escape(user)}" placeholder="Kullanıcı"></div>
-          <div class="col-6 col-md-2"><input class="form-control form-control-sm" name="server" value="{html.escape(server)}" placeholder="Sunucu"></div>
-          <div class="col-6 col-md-auto"><select class="form-select form-select-sm" name="source">{options(source, {"": "Tüm kaynaklar", "mcp": "MCP", "web": "Panel"})}</select></div>
-          <div class="col-6 col-md-auto"><select class="form-select form-select-sm" name="status">{options(status, {"": "Tüm durumlar", "ok": "Başarılı", "error": "Hata", "preview": "Onay bekliyor"})}</select></div>
-          <div class="col-auto"><button type="submit" class="btn btn-sm btn-primary">Filtrele</button>
-            <a class="btn btn-sm btn-link" href="/logs">Temizle</a></div>
+          <div class="col-md"><input class="form-control form-control-sm" name="q" value="{html.escape(q)}" placeholder="{t("Search (command, tool, output…)")}"></div>
+          <div class="col-6 col-md-2"><input class="form-control form-control-sm" name="user" value="{html.escape(user)}" placeholder="{t("User")}"></div>
+          <div class="col-6 col-md-2"><input class="form-control form-control-sm" name="server" value="{html.escape(server)}" placeholder="{t("Server")}"></div>
+          <div class="col-6 col-md-auto"><select class="form-select form-select-sm" name="source">{options(source, {"": t("All sources"), "mcp": "MCP", "web": "Panel"})}</select></div>
+          <div class="col-6 col-md-auto"><select class="form-select form-select-sm" name="status">{options(status, {"": t("All statuses"), "ok": t("Success"), "error": t("Error"), "preview": t("Awaiting confirmation")})}</select></div>
+          <div class="col-auto"><button type="submit" class="btn btn-sm btn-primary">{t("Filter")}</button>
+            <a class="btn btn-sm btn-link" href="/logs">{t("Clear")}</a></div>
         </form>
         <div class="table-responsive"><table class="logs table table-sm table-bordered table-hover align-middle bg-body">
-          <tr><th>Zaman</th><th>Kullanıcı</th><th>Kaynak</th><th>İşlem</th><th>Sunucu</th><th>Durum</th><th>Ayrıntı</th></tr>
+          <tr><th>{t("Time")}</th><th>{t("User")}</th><th>{t("Source")}</th><th>{t("Action")}</th><th>{t("Server")}</th><th>{t("Status")}</th><th>{t("Details")}</th></tr>
           {rows}
         </table></div>
         <p>{nav}</p>
@@ -1218,24 +1238,28 @@ def login_page(action: str, title: str, error: str = "", note: str = "", hidden:
     hidden_inputs = "".join(
         f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'>" for k, v in (hidden or {}).items()
     )
+    token_field = (
+        f'<div class="mb-3"><label class="form-label">{t("Gateway password")}</label>'
+        '<input class="form-control" name="token" type="password" autocomplete="off" required></div>'
+    ) if ask_token else ""
     return render_page(title, f"""
         <div class="card mx-auto shadow-sm" style="max-width: 420px"><div class="card-body">
         <h2 class="h5 mb-3">{html.escape(title)}</h2>
-        <p class="note">{note}Cockpit kullanıcı adınız ve parolanızla giriş yapın ({html.escape(COCKPIT_AUTH_URL)}).</p>
+        <p class="note">{note}{t("Log in with your Cockpit username and password ({url}).", url=html.escape(COCKPIT_AUTH_URL))}</p>
         {f"<div class='alert alert-danger py-2'>{html.escape(error)}</div>" if error else ""}
         <form method="post" action="{html.escape(action)}">
           {hidden_inputs}
-          <div class="mb-3"><label class="form-label">Kullanıcı adı</label>
+          <div class="mb-3"><label class="form-label">{t("Username")}</label>
             <input class="form-control" name="username" autocomplete="username" required autofocus></div>
-          <div class="mb-3"><label class="form-label">Cockpit parolası</label>
+          <div class="mb-3"><label class="form-label">{t("Cockpit password")}</label>
             <input class="form-control" name="password" type="password" autocomplete="current-password" required></div>
-          {'<div class="mb-3"><label class="form-label">Gateway parolası</label><input class="form-control" name="token" type="password" autocomplete="off" required></div>' if ask_token else ''}
-          <button type="submit" class="btn btn-primary w-100">Giriş Yap</button>
+          {token_field}
+          <button type="submit" class="btn btn-primary w-100">{t("Log in")}</button>
         </form>
         </div></div>
     """, status_code)
 
-TOKEN_ERROR = "Gateway parolası hatalı."
+TOKEN_ERROR = N("Wrong gateway password.")
 
 def _token_fields(url_token: str | None) -> tuple[bool, Dict[str, str]]:
     """URL'de geçerli token varsa formda sorma, gizli alanla taşı."""
@@ -1246,17 +1270,17 @@ def _token_fields(url_token: str | None) -> tuple[bool, Dict[str, str]]:
 @app.get("/login", response_class=HTMLResponse)
 async def login_form(request: Request, token: str | None = None):
     ask_token, hidden = _token_fields(token)
-    return login_page("/login", "RHEL MCP Gateway - Giriş", hidden=hidden, ask_token=ask_token)
+    return login_page("/login", t("RHEL MCP Gateway - Login"), hidden=hidden, ask_token=ask_token)
 
 @app.post("/login")
 async def login_submit(request: Request):
     form = await request.form()
     username = (form.get("username") or "").strip()
     # Token Cockpit'ten önce kontrol edilir: token'sız denemeler şifreyi hiç sınayamaz
-    error = TOKEN_ERROR if not login_token_ok(form.get("token")) else await authenticator.login(username, form.get("password") or "")
+    error = t(TOKEN_ERROR) if not login_token_ok(form.get("token")) else await authenticator.login(username, form.get("password") or "")
     if error:
         audit_web(request, "login", "error", user=username, result=error)
-        return login_page("/login", "RHEL MCP Gateway - Giriş", error=error, status_code=401, ask_token=bool(MCP_API_KEY))
+        return login_page("/login", t("RHEL MCP Gateway - Login"), error=error, status_code=401, ask_token=bool(MCP_API_KEY))
     request.session['user'] = {"username": username}
     audit_web(request, "login")
     return RedirectResponse(url='/', status_code=303)
@@ -1268,8 +1292,8 @@ async def oauth_login_form(request_id: str = Query(alias="request")):
     if client_name is None:
         return invalid_login_request()
     return login_page(
-        "/oauth/login", "MCP İstemcisine Erişim İzni",
-        note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
+        "/oauth/login", t("Grant Access to MCP Client"),
+        note=t("<b>{client}</b> wants to access the tools on this gateway.", client=html.escape(client_name)) + " ",
         hidden={"request": request_id},
         ask_token=not login_token_ok(token_from_url(oauth_provider.pending_resource(request_id))),
     )
@@ -1285,12 +1309,12 @@ async def oauth_login_submit(request: Request):
     # Token: istemcinin bağlandığı URL'den (?token=) ya da formdan
     url_token = token_from_url(oauth_provider.pending_resource(request_id))
     token_ok = login_token_ok(url_token) or login_token_ok(form.get("token"))
-    error = TOKEN_ERROR if not token_ok else await authenticator.login(username, form.get("password") or "")
+    error = t(TOKEN_ERROR) if not token_ok else await authenticator.login(username, form.get("password") or "")
     if error:
         audit_web(request, "oauth_login", "error", user=username, args={"client": client_name}, result=error)
         return login_page(
-            "/oauth/login", "MCP İstemcisine Erişim İzni", error=error,
-            note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
+            "/oauth/login", t("Grant Access to MCP Client"), error=error,
+            note=t("<b>{client}</b> wants to access the tools on this gateway.", client=html.escape(client_name)) + " ",
             hidden={"request": request_id}, status_code=401, ask_token=not login_token_ok(url_token),
         )
     redirect = oauth_provider.complete_authorization(request_id, username)
@@ -1339,7 +1363,7 @@ async def handle_sse(request: Request):
     if username is None:
         if request.headers.get("authorization"):
             # Kimlik bilgisi gönderilmiş ama reddedilmiş (başlıksız ilk keşif isteği kaydedilmez)
-            audit_log.record("mcp", "connect", "error", **request_actor(request), result="Kimlik doğrulama reddedildi.")
+            audit_log.record("mcp", "connect", "error", **request_actor(request), result=t("Authentication rejected."))
         # URL'deki geçerli token metadata adresine taşınır; istemci bunu OAuth isteğindeki
         # "resource" alanında geri gönderir ve giriş sayfası token'ı ayrıca sormaz.
         metadata_url = RESOURCE_METADATA_URL
@@ -1347,7 +1371,7 @@ async def handle_sse(request: Request):
         if MCP_API_KEY and login_token_ok(url_token):
             metadata_url += "?" + urlencode({"token": url_token})
         return JSONResponse(
-            {"error": "invalid_token", "error_description": "Cockpit hesabıyla giriş gerekli"},
+            {"error": "invalid_token", "error_description": t("Login with a Cockpit account is required")},
             status_code=401,
             headers={"WWW-Authenticate": f'Bearer error="invalid_token", resource_metadata="{metadata_url}"'},
         )
