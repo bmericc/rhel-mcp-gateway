@@ -5,12 +5,13 @@
 RHEL sunucularını, üzerlerindeki [Cockpit](https://cockpit-project.org) aracılığıyla [Model Context Protocol (MCP)](https://modelcontextprotocol.io) istemcilerine (Claude vb.) açan bir gateway. Yapay zekâ asistanı sunucuların durumunu okuyabilir, servis/paket/firewall yönetebilir ve komut çalıştırabilir.
 
 ```
-MCP istemcisi ──MCP (SSE + OAuth)──▶ public-gateway (:7435) ──Cockpit (wss://host:9090)──▶ RHEL sunucuları
-                                            │                 └─SSH (yedek)───────────────▶
+MCP istemcisi ──MCP (SSE + OAuth)──▶ public-gateway (:7435) ──Cockpit (wss://host:9090)──────────▶ RHEL sunucuları
+                                            │                 ├─SSH tüneli ▶ sunucunun localhost:9090 ─▶
+                                            │                 └─SSH (son yedek)─────────────────────▶
                                             └── giriş: Cockpit hesabı (COCKPIT_AUTH_URL)
 ```
 
-- Komutlar sunucudaki **Cockpit** üzerinden çalışır. Cockpit'e ulaşılamazsa **SSH** yedek olarak kullanılır.
+- Komutlar sunucudaki **Cockpit** üzerinden çalışır. Cockpit portuna dışarıdan ulaşılamazsa Cockpit'e **SSH tüneli** içinden bağlanılır; o da olmazsa komutlar doğrudan **SSH** ile çalışır.
 - Gateway'e giriş (web paneli ve MCP istemcileri) **Cockpit hesabıyla** yapılır. Ayrı bir kullanıcı veritabanı yoktur.
 
 ## Kurulum
@@ -22,12 +23,18 @@ docker compose up -d --build
 
 Gateway `7435` portunda çalışır. Önüne HTTPS sonlandıran bir reverse proxy (nginx, Caddy vb.) koyun; uygulama `X-Forwarded-*` başlıklarını dikkate alır.
 
-Hedef sunucularda Cockpit açık olmalı:
+Hedef sunucularda Cockpit kurulu ve çalışır olmalı:
 
 ```bash
-sudo dnf install -y cockpit
+sudo dnf install -y cockpit            # Debian/Ubuntu: sudo apt install -y cockpit
 sudo systemctl enable --now cockpit.socket
-sudo firewall-cmd --permanent --add-service=cockpit && sudo firewall-cmd --reload
+```
+
+Gateway sunucuya SSH ile bağlanabiliyorsa Cockpit portunu (9090) dışarıya açmak gerekmez; Cockpit'e SSH tüneli içinden ulaşılır (bkz. *Bağlantı sırası*). Doğrudan erişim istenirse port yalnızca gateway'in IP adresine açılmalı:
+
+```bash
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="GATEWAY_IP" port port="9090" protocol="tcp" accept' && sudo firewall-cmd --reload
+# ufw: sudo ufw allow from GATEWAY_IP to any port 9090 proto tcp
 ```
 
 ### Ortam değişkenleri (`.env`)
@@ -42,7 +49,7 @@ sudo firewall-cmd --permanent --add-service=cockpit && sudo firewall-cmd --reloa
 | `ALLOWED_USERS` | Gateway'e girebilecek Cockpit kullanıcıları (virgülle). **Boş bırakılırsa o makinede Cockpit'e girebilen her kullanıcı girebilir.** |
 | `MCP_API_KEY` | Cockpit girişine ek olarak istenen **erişim token'ı** (ikinci faktör). Uzun ve rastgele olmalı. Boşsa yalnızca Cockpit girişi yeter. Değiştirilirse tüm oturumlar kapanır. |
 | `OUTBOUND_PROXY` | Opsiyonel. Sunuculara giden bağlantılar için varsayılan proxy (`socks5://`, `socks5h://`, `http://`). Bkz. *Bağlantı proxy'si*. |
-| `SSH_LOGINS` | SSH yedeğinde denenecek kullanıcılar ve key klasörleri. Varsayılan: `root:/root/.ssh,bmericc:/home/bmericc/.ssh` |
+| `SSH_LOGINS` | SSH bağlantılarında (tünel ve yedek) denenecek kullanıcılar ve key klasörleri. Varsayılan: `root:/root/.ssh,bmericc:/home/bmericc/.ssh` |
 
 `docker-compose.yml`, host makineye `host.docker.internal` adıyla erişim sağlar. Ayrıca `/root/.ssh` ve `/home/bmericc/.ssh` klasörlerini salt okunur bağlar.
 
@@ -87,13 +94,12 @@ Web panelinde (`https://<PUBLIC_URL>/`) Cockpit hesabınızla giriş yapın. Ard
 | Cockpit kullanıcısı / şifresi | Komutların çalışacağı Cockpit hesabı. Yönetici işlemleri için bu kullanıcının sudo yetkisi olmalı. |
 | Cockpit adresi | Boşsa `https://HOST:9090` |
 | TLS sertifikasını doğrula | Kendinden imzalı sertifikada kapalı bırakın |
-| SSH kullanıcısı / portu / key yolu | Cockpit'e ulaşılamazsa kullanılacak yedek |
+| SSH kullanıcısı / portu / key yolu | Cockpit tüneli ve SSH yedeği için |
+| Bağlantı proxy'si | Opsiyonel, bkz. *Bağlantı proxy'si* |
 
 Sunucular `data/servers.json` dosyasında tutulur ve bu dosya git'e alınmaz. Cockpit şifreleri dosyada şifrelidir; `list_servers` aracı şifreleri göstermez.
 
-**Bağlantı sırası:** Cockpit tanımlı sunucularda önce Cockpit'e doğrudan bağlanılır. Ulaşılamazsa (örneğin 9090 güvenlik duvarında kapalıysa) SSH ile bağlanılıp bağlantının içinden sunucunun kendi Cockpit'ine (`localhost:9090`) tünel açılır ve komutlar yine Cockpit üzerinden çalışır; böylece Cockpit portunu dışarıya açmak gerekmez. O da olmazsa komutlar düz SSH ile (`sudo -n`) çalışır. Doğrudan Cockpit'e ulaşılamadığı 10 dakika hatırlanır; bu sürede her çağrıda zaman aşımı beklenmeden tünel kullanılır. Cockpit şifresi reddedilirse tünel denenmez.
-
-**Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır ve aynı sıra denenir. Yalnızca düz SSH çalışıyorsa sunucu kaydedilir ama ⚠ ile uyarı gösterilir. Hiç bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
+**Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır ve *Bağlantı sırası*ndaki yollar denenir. Cockpit doğrudan ya da SSH tüneliyle çalışıyorsa ✓, yalnızca düz SSH çalışıyorsa sunucu kaydedilir ama ⚠ ile uyarı (ve Cockpit'in neden çalışmadığı) gösterilir. Hiç bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
 
 **Gateway'in dış IP adresi:** Panelin üstünde gateway'in internete çıktığı IP adresi gösterilir. Bu, uzaktaki sunucuların güvenlik duvarında Cockpit (9090/tcp) ve SSH (22/tcp) için izin verilmesi gereken adrestir (SSH açıksa Cockpit tünelden kullanılabildiği için 9090 zorunlu değildir). Adres 10 dakika önbelleklenir; *Yenile* düğmesiyle tekrar sorgulanabilir. Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.
 
@@ -108,14 +114,20 @@ Sunuculara giden Cockpit ve SSH bağlantıları bir proxy üzerinden yapılabili
 
 ### Ortak SSH anahtarları
 
-Panelin *Ortak SSH Anahtarları* bölümünden bir özel anahtar yapıştırılabilir (parolalıysa anahtar parolasıyla birlikte) ya da yeni bir Ed25519 anahtarı üretilebilir. Bu anahtarlar SSH yedeğinde tüm sunucularda, her kullanıcı için, kullanıcının kendi `.ssh` anahtarlarından sonra denenir. Tablodaki açık anahtar satırını sunuculardaki `~/.ssh/authorized_keys` dosyasına eklemeniz yeterlidir. Özel anahtarlar `data/ssh_keys.json` içinde `SECRET_KEY` ile şifreli saklanır ve panelde gösterilmez.
+Panelin *Ortak SSH Anahtarları* bölümünden bir özel anahtar yapıştırılabilir (parolalıysa anahtar parolasıyla birlikte) ya da yeni bir Ed25519 anahtarı üretilebilir. Bu anahtarlar SSH bağlantılarında (Cockpit tüneli ve SSH yedeği) tüm sunucularda, her kullanıcı için, kullanıcının kendi `.ssh` anahtarlarından sonra denenir. Tablodaki açık anahtar satırını sunuculardaki `~/.ssh/authorized_keys` dosyasına eklemeniz yeterlidir. Özel anahtarlar `data/ssh_keys.json` içinde `SECRET_KEY` ile şifreli saklanır ve panelde gösterilmez.
 
 ### Bağlantı sırası
 
-1. Sunucuda Cockpit kullanıcısı tanımlıysa önce **Cockpit** denenir. Yönetici işlemleri Cockpit'in superuser (sudo) mekanizmasıyla yapılır.
-2. Cockpit'e ulaşılamazsa veya giriş reddedilirse **SSH** kullanılır. Önce sunucuya tanımlı kullanıcı, sonra `SSH_LOGINS` sırası denenir. Root olmayan kullanıcıda yönetici komutları `sudo -n` ile çalışır.
+1. **Cockpit (doğrudan):** sunucuda Cockpit kullanıcısı tanımlıysa önce Cockpit adresine bağlanılır. Yönetici işlemleri Cockpit'in superuser (sudo) mekanizmasıyla yapılır.
+2. **Cockpit (SSH tüneli):** Cockpit'e ulaşılamazsa (örneğin 9090 güvenlik duvarında kapalıysa) sunucuya SSH ile bağlanılır ve bağlantının içinden sunucunun kendi Cockpit'ine (`localhost:9090`) tünel açılır. Komutlar yine Cockpit üzerinden çalışır; Cockpit portunu dışarıya açmak gerekmez. Sunucuda SSH port yönlendirmesi (`AllowTcpForwarding`, varsayılan açık) kapalı olmamalı.
+3. **SSH:** tünel de kurulamazsa komutlar doğrudan SSH ile çalışır. Root olmayan kullanıcıda yönetici komutları `sudo -n` ile (parolasız sudo gerekir) çalışır.
 
-Her araç çıktısında hangi yolla bağlanıldığı yazar: `"connection": {"via": "cockpit"}`.
+SSH'ta önce sunucuya tanımlı kullanıcı, sonra `SSH_LOGINS` sırası denenir; her kullanıcı için kendi anahtarlarından sonra ortak anahtarlar denenir.
+
+- Doğrudan Cockpit'e ulaşılamadığı 10 dakika hatırlanır; bu sürede her çağrıda zaman aşımı beklenmeden tünel kullanılır.
+- Cockpit şifreyi reddederse tünel denenmez, doğrudan SSH'a geçilir.
+
+Her araç çıktısında hangi yolla bağlanıldığı yazar: `"connection": {"via": "cockpit" | "cockpit-ssh" | "ssh"}`. SSH'a düşüldüyse `cockpit_error` alanında Cockpit'in neden kullanılamadığı yer alır.
 
 ## MCP araçları
 
@@ -148,6 +160,8 @@ Her araç çıktısında hangi yolla bağlanıldığı yazar: `"connection": {"v
 | `reboot_server` | Yeniden başlat |
 | `run_remote_command` | Serbest komut (`as_root` ile yönetici yetkisi) |
 
+Paket ve güvenlik duvarı araçları RHEL ailesi içindir (`dnf`, `firewalld`). Debian/Ubuntu sunucularda bunlar yerine `run_remote_command` kullanılabilir.
+
 Girdiler (servis, paket, port vb.) doğrulanır. Komutlar argv olarak verildiği için komut enjeksiyonuna kapalıdır. Çıktılar JSON döner, uzun çıktılar kırpılır, komutlar zaman aşımına uğrar.
 
 ## Geliştirme ve testler
@@ -172,7 +186,7 @@ python -m pytest
 
 - `ALLOWED_USERS`'ı mutlaka doldurun. Gateway, kayıtlı sunucularda yönetici yetkisiyle işlem yapabilir.
 - `MCP_API_KEY`'i uzun ve rastgele seçin (örn. `openssl rand -hex 32`). Cockpit şifresi zayıf olsa bile token olmadan giriş yapılamaz. Token yanlışsa şifre Cockpit'e hiç gönderilmez.
-- Cockpit bağlantılarında TLS doğrulaması varsayılan olarak kapalıdır (kendinden imzalı sertifikalar için). SSH yedeğinde sunucu anahtarı doğrulanmaz (`known_hosts=None`). İkisi de güvenilir ağ varsayar.
+- Cockpit bağlantılarında TLS doğrulaması varsayılan olarak kapalıdır (kendinden imzalı sertifikalar için); SSH tüneli içindeki Cockpit bağlantısında hiç doğrulanmaz. SSH'ta sunucu anahtarı doğrulanmaz (`known_hosts=None`). Bunlar güvenilir ağ varsayar.
 - `SECRET_KEY`'i gizli tutun ve değiştirmeyin.
 
 ## Bileşenler
