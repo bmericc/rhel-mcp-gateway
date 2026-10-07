@@ -92,6 +92,8 @@ Sunucular `data/servers.json` dosyasında tutulur ve bu dosya git'e alınmaz. Co
 
 **Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır. Cockpit tanımlıysa Cockpit'e giriş yapılıp basit bir komut çalıştırılır; tanımlı değilse SSH denenir. Bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
 
+**Gateway'in dış IP adresi:** Panelin üstünde gateway'in internete çıktığı IP adresi gösterilir. Bu, uzaktaki sunucuların güvenlik duvarında Cockpit (9090/tcp) ve SSH (22/tcp) için izin verilmesi gereken adrestir. Adres 10 dakika önbelleklenir; *Yenile* düğmesiyle tekrar sorgulanabilir. Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.
+
 ### Ortak SSH anahtarları
 
 Panelin *Ortak SSH Anahtarları* bölümünden bir özel anahtar yapıştırılabilir (parolalıysa anahtar parolasıyla birlikte) ya da yeni bir Ed25519 anahtarı üretilebilir. Bu anahtarlar SSH yedeğinde tüm sunucularda, her kullanıcı için, kullanıcının kendi `.ssh` anahtarlarından sonra denenir. Tablodaki açık anahtar satırını sunuculardaki `~/.ssh/authorized_keys` dosyasına eklemeniz yeterlidir. Özel anahtarlar `data/ssh_keys.json` içinde `SECRET_KEY` ile şifreli saklanır ve panelde gösterilmez.

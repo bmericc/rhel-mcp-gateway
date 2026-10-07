@@ -65,3 +65,12 @@ def shared_keys_file(tmp_path, monkeypatch):
     path = tmp_path / "data" / "ssh_keys.json"
     monkeypatch.setattr(main, "SSH_KEYS_FILE", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_public_ip_lookup(monkeypatch):
+    """Panel testleri dış IP servislerine gerçekten istek atmasın (test_public_ip.py kendi sahtesini kurar)."""
+    async def offline(url):
+        return None
+
+    monkeypatch.setattr(main, "_fetch_ip", offline)
