@@ -90,6 +90,12 @@ Web panelinde (`https://<PUBLIC_URL>/`) Cockpit hesabınızla giriş yapın. Ard
 
 Sunucular `data/servers.json` dosyasında tutulur ve bu dosya git'e alınmaz. Cockpit şifreleri dosyada şifrelidir; `list_servers` aracı şifreleri göstermez.
 
+**Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır. Cockpit tanımlıysa Cockpit'e giriş yapılıp basit bir komut çalıştırılır; tanımlı değilse SSH denenir. Bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
+
+### Ortak SSH anahtarları
+
+Panelin *Ortak SSH Anahtarları* bölümünden bir özel anahtar yapıştırılabilir (parolalıysa anahtar parolasıyla birlikte) ya da yeni bir Ed25519 anahtarı üretilebilir. Bu anahtarlar SSH yedeğinde tüm sunucularda, her kullanıcı için, kullanıcının kendi `.ssh` anahtarlarından sonra denenir. Tablodaki açık anahtar satırını sunuculardaki `~/.ssh/authorized_keys` dosyasına eklemeniz yeterlidir. Özel anahtarlar `data/ssh_keys.json` içinde `SECRET_KEY` ile şifreli saklanır ve panelde gösterilmez.
+
 ### Bağlantı sırası
 
 1. Sunucuda Cockpit kullanıcısı tanımlıysa önce **Cockpit** denenir. Yönetici işlemleri Cockpit'in superuser (sudo) mekanizmasıyla yapılır.

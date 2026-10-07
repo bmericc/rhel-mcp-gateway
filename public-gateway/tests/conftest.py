@@ -57,3 +57,11 @@ def ssh_dirs(tmp_path, monkeypatch):
         return str(path)
 
     return add_key
+
+
+@pytest.fixture(autouse=True)
+def shared_keys_file(tmp_path, monkeypatch):
+    """Ortak SSH anahtarları dosyasını geçici bir yere yönlendirir."""
+    path = tmp_path / "data" / "ssh_keys.json"
+    monkeypatch.setattr(main, "SSH_KEYS_FILE", str(path))
+    return path
