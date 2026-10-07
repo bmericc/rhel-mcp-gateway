@@ -6,6 +6,8 @@ RHEL sunucularını, üzerlerindeki [Cockpit](https://cockpit-project.org) arac�
 
 ![RHEL MCP Gateway nasıl çalışıyor](docs/images/nasil-calisiyor.png)
 
+Ayrıntılı mimari ve güvenlik açıklaması için: [Teknik Genel Bakış](docs/genel-bakis.md)
+
 - Komutlar sunucudaki **Cockpit** üzerinden çalışır. Cockpit portuna dışarıdan ulaşılamazsa Cockpit'e **SSH tüneli** içinden bağlanılır; o da olmazsa komutlar doğrudan **SSH** ile çalışır.
 - Gateway'e giriş (web paneli ve MCP istemcileri) **Cockpit hesabıyla** yapılır. Ayrı bir kullanıcı veritabanı yoktur.
 
