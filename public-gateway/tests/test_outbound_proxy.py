@@ -321,3 +321,57 @@ async def test_public_ip_through_default_proxy(monkeypatch):
     html = main.public_ip_html(direct, via)
     assert "Varsayılan proxy (socks5://p:1080) çıkış IP adresi: <code>198.51.100.9</code>" in html
     assert "Gateway dış IP adresi: <code>203.0.113.7</code>" in html
+
+
+# --- Codex incelemesinden gelen durumlar ---
+
+async def test_http_connect_keeps_bytes_after_header():
+    """Proxy 200 yanıtıyla hedefin ilk verisini (SSH banner'ı) aynı pakette gönderirse veri kaybolmamalı."""
+    async def handle(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-OpenSSH_9.6\r\n")
+        await writer.drain()
+        await asyncio.sleep(0.5)
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        sock = await outbound_proxy.open_tunnel(f"http://127.0.0.1:{port}", "10.0.0.1", 22, timeout=5)
+        reader, writer = await asyncio.open_connection(sock=sock)
+        assert await asyncio.wait_for(reader.readline(), 2) == b"SSH-2.0-OpenSSH_9.6\r\n"
+        writer.close()
+    finally:
+        server.close()
+
+
+def test_unreadable_proxy_setting_fails_closed(monkeypatch):
+    monkeypatch.setattr(main, "OUTBOUND_PROXY", "socks5://varsayilan:1080")
+    cfg = {"name": "s", "host": "h", "proxy": "bozuk-sifreli-deger"}
+    with pytest.raises(outbound_proxy.ProxyError, match="çözülemedi"):
+        main.server_proxy(cfg)
+    assert main.proxy_label(cfg) == "proxy ayarı çözülemedi"
+
+
+async def test_unreadable_proxy_blocks_ssh(monkeypatch, ssh_dirs):
+    ssh_dirs("root")
+    calls = []
+    monkeypatch.setattr(main.asyncssh, "connect", lambda host, **kw: calls.append(kw) or SSHConn())
+    with pytest.raises(main.SSHError, match="çözülemedi"):
+        async with main.ssh_session({"name": "s", "host": "127.0.0.1", "proxy": "bozuk"}):
+            pass
+    assert calls == []
+
+
+async def test_unreadable_proxy_blocks_cockpit_and_check(cockpit, monkeypatch, ssh_dirs):
+    ssh_dirs("root")
+    calls = []
+    monkeypatch.setattr(main.asyncssh, "connect", lambda host, **kw: calls.append(kw) or SSHConn())
+    cfg = {"name": "s", "host": "127.0.0.1", "cockpit_url": cockpit.url, "cockpit_user": "admin",
+           "cockpit_password": main.encrypt_secret(PASSWORD), "proxy": "bozuk"}
+    result = await main.check_server(cfg)
+    assert result["ok"] is False
+    assert "çözülemedi" in result["message"]
+    # Ne Cockpit'e ne SSH'a doğrudan bağlanıldı
+    assert cockpit.fake.logins == []
+    assert calls == []

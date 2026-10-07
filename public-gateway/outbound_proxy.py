@@ -70,9 +70,11 @@ async def _http_connect(loop, sock, p: dict, host: str, port: int):
         token = base64.b64encode(f"{p['username']}:{p['password'] or ''}".encode()).decode()
         lines.append(f"Proxy-Authorization: Basic {token}")
     await loop.sock_sendall(sock, ("\r\n".join(lines) + "\r\n\r\n").encode())
+    # Yanıt başlığı bayt bayt okunur: hedefin ilk verisi (örn. SSH banner'ı) aynı pakette
+    # gelebilir ve başlığın sonundan sonrasını tüketmemek gerekir.
     response = b""
-    while b"\r\n\r\n" not in response:
-        chunk = await loop.sock_recv(sock, 1024)
+    while not response.endswith(b"\r\n\r\n"):
+        chunk = await loop.sock_recv(sock, 1)
         if not chunk:
             raise ProxyError("HTTP proxy bağlantıyı kapattı.")
         response += chunk

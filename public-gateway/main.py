@@ -118,15 +118,25 @@ def public_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # IP adresini görür. Sunucu bazında farklı bir proxy ya da "direct" (proxysiz) seçilebilir.
 OUTBOUND_PROXY = os.getenv("OUTBOUND_PROXY", "").strip()
 
+PROXY_UNREADABLE = "Sunucunun proxy ayarı çözülemedi (SECRET_KEY değişmiş olabilir); panelden yeniden girin."
+
 def server_proxy(cfg: Dict[str, Any]) -> str | None:
-    """Sunucuya bağlanırken kullanılacak proxy adresi (None = doğrudan)."""
-    stored = decrypt_secret(cfg["proxy"]) if cfg.get("proxy") else None
-    if stored == "direct":
-        return None
-    return stored or OUTBOUND_PROXY or None
+    """Sunucuya bağlanırken kullanılacak proxy adresi (None = doğrudan).
+
+    Sunucuya özel ayar var ama çözülemiyorsa bağlantı kurulmaz (ProxyError): sessizce varsayılan
+    proxy'ye ya da doğrudan bağlantıya düşmek, beklenmeyen bir IP adresinden bağlanmak demek olur.
+    """
+    if cfg.get("proxy"):
+        stored = decrypt_secret(cfg["proxy"])
+        if stored is None:
+            raise outbound_proxy.ProxyError(PROXY_UNREADABLE)
+        return None if stored == "direct" else stored
+    return OUTBOUND_PROXY or None
 
 def proxy_label(cfg: Dict[str, Any]) -> str:
     stored = decrypt_secret(cfg["proxy"]) if cfg.get("proxy") else None
+    if cfg.get("proxy") and stored is None:
+        return "proxy ayarı çözülemedi"
     if stored == "direct":
         return "doğrudan"
     if stored:
@@ -252,7 +262,10 @@ async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_
     if not candidates:
         raise SSHError(f"Hata: '{cfg.get('name', cfg.get('host'))}' için kullanılabilir SSH key bulunamadı.")
 
-    proxy = server_proxy(cfg)
+    try:
+        proxy = server_proxy(cfg)
+    except outbound_proxy.ProxyError as e:
+        raise SSHError(f"SSH Bağlantı Hatası: {e}") from e
     denied = []
     for user, keys in candidates:
         try:
@@ -322,13 +335,13 @@ async def open_runner(cfg: Dict[str, Any]):
         if password is None:
             cockpit_error = "Cockpit şifresi çözülemedi (şifre girilmemiş ya da SECRET_KEY değişmiş olabilir)."
         else:
-            candidate = cockpit_client.CockpitSession(
-                cockpit_url(cfg), cfg["cockpit_user"], password,
-                verify_tls=bool(cfg.get("cockpit_verify_tls")), proxy=server_proxy(cfg),
-            )
             try:
+                candidate = cockpit_client.CockpitSession(
+                    cockpit_url(cfg), cfg["cockpit_user"], password,
+                    verify_tls=bool(cfg.get("cockpit_verify_tls")), proxy=server_proxy(cfg),
+                )
                 session = await candidate.connect()
-            except cockpit_client.CockpitError as e:
+            except (cockpit_client.CockpitError, outbound_proxy.ProxyError) as e:
                 cockpit_error = str(e)
         if session is not None:
             try:
@@ -607,12 +620,18 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
         if password is None:
             error = "Cockpit şifresi çözülemedi; şifreyi yeniden girin."
         else:
+            try:
+                proxy = server_proxy(cfg)
+            except outbound_proxy.ProxyError as e:
+                proxy, error = None, str(e)
             session = cockpit_client.CockpitSession(
                 cockpit_url(cfg), cfg["cockpit_user"], password,
                 verify_tls=bool(cfg.get("cockpit_verify_tls")), connect_timeout=CHECK_TIMEOUT,
-                proxy=server_proxy(cfg),
+                proxy=proxy,
             )
             try:
+                if error:
+                    raise cockpit_client.CockpitError(error)
                 await session.connect()
                 result = await session.spawn(["true"], timeout=CHECK_TIMEOUT)
                 if result.exit_status != 0:
