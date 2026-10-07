@@ -137,3 +137,18 @@ def test_test_button_updates_status(cockpit, client, servers_file, ssh_dirs):
 
 def test_test_button_requires_login(servers_file):
     assert TestClient(main.app).post("/servers/srv/test").status_code == 403
+
+
+def test_cockpit_down_but_ssh_works_is_warning(client, monkeypatch, servers_file, ssh_dirs):
+    # Cockpit portu kapalı, SSH yedeği çalışıyor: MCP araçları gibi test de bağlanabilmeli
+    ssh_dirs("root")
+    monkeypatch.setattr(main.asyncssh, "connect", lambda host, **kw: SSHConn())
+    servers_file({"srv": {"name": "srv", "host": "127.0.0.1", "cockpit_url": "https://127.0.0.1:1",
+                          "cockpit_user": "admin", "cockpit_password": main.encrypt_secret(PASSWORD)}})
+    client.post("/servers/srv/test", follow_redirects=False)
+    check = main.load_servers()["srv"]["last_check"]
+    assert check["ok"] is True and check["warning"] is True and check["via"] == "ssh"
+    assert "SSH yedeği ile bağlanıldı" in check["message"]
+    # Boş hata mesajı yerine sebep yazılır
+    assert not check["message"].rstrip().endswith("):")
+    assert "⚠" in client.get("/").text

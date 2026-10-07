@@ -487,6 +487,7 @@ PAGE_STYLE = """
   .note { color: #555; font-size: 13px; }
   .err { color: #b00020; }
   .ok { color: #1b7f3b; }
+  .warn { color: #a15c00; }
   td form { display: inline; }
   form.login { display: grid; grid-template-columns: 140px 220px; gap: 8px; }
   textarea.key { width: 100%; font-family: monospace; font-size: 12px; }
@@ -599,8 +600,8 @@ def public_ip_html(ips: Dict[str, str | None], proxy_ips: Dict[str, str | None] 
 async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Sunucuya gerçekten bağlanıp basit bir komut çalıştırarak bilgileri doğrular.
 
-    Cockpit tanımlıysa Cockpit'in çalışması gerekir (SSH yedeği yalnızca bilgi olarak denenir);
-    tanımlı değilse SSH denenir.
+    MCP araçlarıyla aynı sıra izlenir: Cockpit tanımlıysa önce Cockpit, çalışmazsa SSH yedeği.
+    Yalnızca SSH ile bağlanılabiliyorsa sonuç başarılı ama "warning" işaretlidir.
     """
     checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -643,8 +644,12 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
         if error is None:
             return {"ok": True, "via": "cockpit", "message": "Cockpit bağlantısı başarılı.", "at": checked_at}
         ssh_error = await try_ssh()
-        fallback = "SSH yedeği çalışıyor." if ssh_error is None else "SSH yedeği de çalışmıyor."
-        return {"ok": False, "via": None, "message": f"{error} ({fallback})", "at": checked_at}
+        if ssh_error is None:
+            # MCP araçları da bu durumda SSH yedeğiyle çalışır: sunucu kullanılabilir, ama uyarı gösterilir
+            return {"ok": True, "warning": True, "via": "ssh",
+                    "message": f"SSH yedeği ile bağlanıldı; Cockpit çalışmıyor: {error}", "at": checked_at}
+        return {"ok": False, "via": None, "message": f"{error} (SSH yedeği de çalışmıyor: {ssh_error})",
+                "at": checked_at}
 
     ssh_error = await try_ssh()
     if ssh_error is None:
@@ -658,7 +663,12 @@ def server_row(cfg: Dict[str, Any]) -> str:
     ssh = f"{e(cfg.get('user') or 'otomatik')} @ {e(cfg['host'])}:{e(cfg.get('port', 22))}"
     check = cfg.get("last_check")
     if check:
-        mark, css = ("✓", "ok") if check.get("ok") else ("✗", "err")
+        if not check.get("ok"):
+            mark, css = "✗", "err"
+        elif check.get("warning"):
+            mark, css = "⚠", "warn"
+        else:
+            mark, css = "✓", "ok"
         status = (f"<span class='{css}' title='{e(check.get('message'))}'>{mark} {e(check.get('message'))}</span>"
                   f"<br><span class='note'>{e(check.get('at'))}</span>")
     else:
@@ -831,6 +841,8 @@ async def save_server(request: Request):
     servers = load_servers()
     servers[name] = cfg
     save_servers(servers)
+    if check.get("warning"):
+        return _redirect_error(f"'{name}' kaydedildi. {check['message']}")
     return _redirect_info(f"'{name}' kaydedildi. {check['message']}")
 
 @app.post("/public-ip/refresh")
@@ -857,7 +869,7 @@ async def test_server(name: str, request: Request):
     if name in servers:
         servers[name]["last_check"] = check
         save_servers(servers)
-    if check["ok"]:
+    if check["ok"] and not check.get("warning"):
         return _redirect_info(f"'{name}': {check['message']}")
     return _redirect_error(f"'{name}': {check['message']}")
 
