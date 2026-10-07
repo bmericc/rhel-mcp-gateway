@@ -43,6 +43,15 @@ def test_generate_key(client, shared_keys_file):
     assert oct(shared_keys_file.stat().st_mode & 0o777) == "0o600"
 
 
+def test_paste_duplicate_name_rejected(client):
+    client.post("/ssh-keys/generate", data={"name": "ortak"})
+    before = main.load_shared_keys()["ortak"]["fingerprint"]
+    resp = client.post("/ssh-keys", data={"name": "ortak", "private_key": new_key().export_private_key().decode()},
+                       follow_redirects=False)
+    assert "zaten var" in client.get(resp.headers["location"]).text
+    assert main.load_shared_keys()["ortak"]["fingerprint"] == before
+
+
 def test_generate_duplicate_name_rejected(client):
     client.post("/ssh-keys/generate", data={"name": "ortak"})
     resp = client.post("/ssh-keys/generate", data={"name": "ortak"}, follow_redirects=False)

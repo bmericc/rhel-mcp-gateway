@@ -76,6 +76,12 @@ def test_unreachable_cockpit_is_not_saved(client, ssh_dirs):
     assert main.load_servers() == {}
 
 
+def test_skip_check_clears_previous_status(cockpit, client, servers_file):
+    servers_file({"srv": {"name": "srv", "host": "127.0.0.1", "last_check": {"ok": True, "message": "eski", "at": "x"}}})
+    client.post("/servers", data=form(cockpit.url, password=WRONG_PASSWORD, skip_check="on"))
+    assert "last_check" not in main.load_servers()["srv"]
+
+
 def test_skip_check_saves_without_connecting(cockpit, client):
     resp = client.post("/servers", data=form(cockpit.url, password=WRONG_PASSWORD, skip_check="on"),
                        follow_redirects=False)
@@ -87,10 +93,18 @@ def test_skip_check_saves_without_connecting(cockpit, client):
 
 def test_ssh_only_server_checked_over_ssh(client, monkeypatch, ssh_dirs):
     ssh_dirs("root")
-    monkeypatch.setattr(main.asyncssh, "connect", lambda host, **kw: SSHConn())
+    seen = []
+
+    def connect(host, **kw):
+        seen.append(kw)
+        return SSHConn()
+
+    monkeypatch.setattr(main.asyncssh, "connect", connect)
     resp = client.post("/servers", data={"name": "srv", "host": "10.0.0.1", "port": "22"}, follow_redirects=False)
     assert "info=" in resp.headers["location"]
     assert main.load_servers()["srv"]["last_check"]["via"] == "ssh"
+    # Bağlantı kurulumu da zaman aşımıyla sınırlı
+    assert seen[0]["connect_timeout"] == main.CHECK_TIMEOUT
 
 
 def test_ssh_only_server_unreachable(client, monkeypatch, ssh_dirs):

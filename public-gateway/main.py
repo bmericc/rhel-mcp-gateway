@@ -214,8 +214,10 @@ def login_candidates(cfg: Dict[str, Any]) -> list[tuple[str, list]]:
 class SSHError(Exception):
     """Bağlantı kurulamadı veya hiçbir kullanıcı ile giriş yapılamadı."""
 
+SSH_CONNECT_TIMEOUT = 15
+
 @asynccontextmanager
-async def ssh_session(cfg: Dict[str, Any]):
+async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_TIMEOUT):
     """Sunucuya bağlanır; (kullanıcı, bağlantı) döner.
 
     Kimlik doğrulama reddedilirse sıradaki kullanıcı denenir; ağ hatasında hemen vazgeçilir.
@@ -232,7 +234,9 @@ async def ssh_session(cfg: Dict[str, Any]):
                 port=cfg.get("port", 22),
                 username=user,
                 client_keys=keys,
-                known_hosts=None
+                known_hosts=None,
+                # asyncssh'de varsayılan olarak bağlantı için zaman aşımı yok; takılan sunucu beklenmesin
+                connect_timeout=connect_timeout,
             )
             conn = await cm.__aenter__()
         except asyncssh.PermissionDenied as e:
@@ -241,7 +245,8 @@ async def ssh_session(cfg: Dict[str, Any]):
             continue
         except Exception as e:
             # Ağ/bağlantı hatasında diğer kullanıcıları denemenin anlamı yok
-            raise SSHError(f"SSH Bağlantı Hatası: {str(e)}") from e
+            reason = "bağlantı zaman aşımına uğradı" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else (str(e) or type(e).__name__)
+            raise SSHError(f"SSH Bağlantı Hatası: {reason}") from e
         try:
             yield user, conn
         finally:
@@ -480,7 +485,7 @@ async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     async def try_ssh() -> str | None:
         try:
-            async with ssh_session(cfg) as (user, conn):
+            async with ssh_session(cfg, connect_timeout=CHECK_TIMEOUT) as (user, conn):
                 result = await make_runner(user, conn)("true", timeout=CHECK_TIMEOUT)
             if result.exit_status != 0:
                 return f"SSH komutu başarısız: {result.stderr.strip() or result.exit_status}"
@@ -660,9 +665,7 @@ async def save_server(request: Request):
             return _redirect_error("Cockpit kullanıcısı için şifre gerekli.")
 
     if form.get("skip_check"):
-        cfg["last_check"] = existing.get("last_check") if existing.get("host") == host else None
-        if cfg["last_check"] is None:
-            cfg.pop("last_check")
+        # Bilgiler test edilmedi: eski (başka ayarlara ait olabilecek) durum gösterilmesin
         servers[name] = cfg
         save_servers(servers)
         return _redirect_info(f"'{name}' bağlantı testi yapılmadan kaydedildi.")
@@ -724,11 +727,14 @@ async def add_shared_key(request: Request):
     name = _key_name(form)
     if not name:
         return _redirect_error("Anahtar adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir.")
+    keys = load_shared_keys()
+    if name in keys:
+        # Eski açık anahtar sunuculara dağıtılmış olabilir; yanlışlıkla üzerine yazılmasın
+        return _redirect_error(f"'{name}' adında bir anahtar zaten var. Değiştirmek için önce silin.")
     try:
         entry = import_shared_key(name, form.get("private_key") or "", form.get("passphrase") or "")
     except ValueError as e:
         return _redirect_error(f"Anahtar eklenmedi: {e}")
-    keys = load_shared_keys()
     keys[name] = entry
     save_shared_keys(keys)
     return _redirect_info(f"'{name}' anahtarı eklendi ({entry['fingerprint']}).")
