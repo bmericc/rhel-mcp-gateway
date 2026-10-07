@@ -111,7 +111,7 @@ def test_authorization_server_metadata():
 
 # --- Uçtan uca OAuth akışı (MCP istemcisinin yaptığı gibi) ---
 
-def oauth_flow(client, username="admin", password=PASSWORD):
+def oauth_flow(client, username="admin", password=PASSWORD, resource=None, token=None):
     reg = client.post("/register", json={
         "client_name": "Test MCP Client",
         "redirect_uris": ["http://localhost:9999/callback"],
@@ -127,6 +127,7 @@ def oauth_flow(client, username="admin", password=PASSWORD):
     resp = client.get("/authorize", params={
         "response_type": "code", "client_id": client_id, "redirect_uri": "http://localhost:9999/callback",
         "code_challenge": challenge, "code_challenge_method": "S256", "state": "xyz",
+        **({"resource": resource} if resource else {}),
     }, follow_redirects=False)
     assert resp.status_code == 302, resp.text
     login_url = urlparse(resp.headers["location"])
@@ -135,9 +136,12 @@ def oauth_flow(client, username="admin", password=PASSWORD):
 
     page = client.get("/oauth/login", params={"request": request_id})
     assert "Test MCP Client" in page.text
+    client.last_login_page = page.text
 
-    resp = client.post("/oauth/login", data={"request": request_id, "username": username, "password": password},
-                       follow_redirects=False)
+    data = {"request": request_id, "username": username, "password": password}
+    if token is not None:
+        data["token"] = token
+    resp = client.post("/oauth/login", data=data, follow_redirects=False)
     return client_id, verifier, request_id, resp
 
 
@@ -237,3 +241,114 @@ async def test_token_rejected_if_user_removed_from_allowed(cockpit, provider, mo
     req = Request({"type": "http", "headers": [(b"authorization", f"Bearer {tokens['access_token']}".encode())],
                    "query_string": b""})
     assert await main.authenticate_mcp(req) is None
+
+
+# --- Erişim token'ı (MCP_API_KEY) ikinci faktör olarak ---
+
+LOGIN_TOKEN = "xxx-giris-token"
+
+
+@pytest.fixture
+def login_token(monkeypatch):
+    monkeypatch.setattr(main, "MCP_API_KEY", LOGIN_TOKEN)
+    return LOGIN_TOKEN
+
+
+def test_web_login_asks_for_token(cockpit, login_token, servers_file):
+    client = TestClient(main.app)
+    assert 'name="token"' in client.get("/login").text
+
+    logins = len(cockpit.fake.logins)
+    resp = client.post("/login", data={"username": "admin", "password": PASSWORD})
+    assert resp.status_code == 401
+    assert "Gateway parolası hatalı" in resp.text
+    # Token yanlışsa şifre Cockpit'e hiç gönderilmez
+    assert len(cockpit.fake.logins) == logins
+
+    resp = client.post("/login", data={"username": "admin", "password": PASSWORD, "token": "yanlis-xxx"})
+    assert resp.status_code == 401
+
+    resp = client.post("/login", data={"username": "admin", "password": PASSWORD, "token": LOGIN_TOKEN},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+
+
+def test_web_login_token_from_url(cockpit, login_token, servers_file):
+    client = TestClient(main.app)
+    page = client.get("/login", params={"token": LOGIN_TOKEN}).text
+    assert "Gateway parolası" not in page
+    assert f"name='token' value='{LOGIN_TOKEN}'" in page
+    # URL'deki token yanlışsa form yine sorar
+    assert 'name="token"' in client.get("/login", params={"token": "yanlis-xxx"}).text
+
+
+def test_oauth_asks_token_when_not_in_url(cockpit, provider, login_token):
+    client = TestClient(main.app)
+    _, _, request_id, resp = oauth_flow(client)
+    assert 'name="token"' in client.last_login_page
+    assert resp.status_code == 401
+    ok = client.post("/oauth/login", data={"request": request_id, "username": "admin", "password": PASSWORD,
+                                           "token": LOGIN_TOKEN}, follow_redirects=False)
+    assert ok.status_code == 302
+    assert "code=" in ok.headers["location"]
+
+
+def test_oauth_uses_token_from_connection_url(cockpit, provider, login_token):
+    client = TestClient(main.app)
+    resource = f"{main.MCP_RESOURCE_URL}?token={LOGIN_TOKEN}"
+    _, _, _, resp = oauth_flow(client, resource=resource)
+    assert "Gateway parolası" not in client.last_login_page
+    assert resp.status_code == 302
+    assert "code=" in resp.headers["location"]
+
+
+def test_oauth_wrong_token_in_url_asks_again(cockpit, provider, login_token):
+    client = TestClient(main.app)
+    _, _, _, resp = oauth_flow(client, resource=f"{main.MCP_RESOURCE_URL}?token=yanlis-xxx")
+    assert 'name="token"' in client.last_login_page
+    assert resp.status_code == 401
+
+
+def test_sse_401_carries_valid_url_token_to_metadata(login_token):
+    client = TestClient(main.app)
+    header = client.get("/sse", params={"token": LOGIN_TOKEN}).headers["www-authenticate"]
+    assert f'oauth-protected-resource/sse?token={LOGIN_TOKEN}"' in header
+    header = client.get("/sse", params={"token": "yanlis-xxx"}).headers["www-authenticate"]
+    assert "?token=" not in header
+
+    data = client.get("/.well-known/oauth-protected-resource/sse", params={"token": LOGIN_TOKEN}).json()
+    assert data["resource"] == f"{main.MCP_RESOURCE_URL}?token={LOGIN_TOKEN}"
+    data = client.get("/.well-known/oauth-protected-resource/sse", params={"token": "yanlis-xxx"}).json()
+    assert data["resource"] == main.MCP_RESOURCE_URL
+
+
+@pytest.mark.anyio
+async def test_basic_requires_token(cockpit, login_token):
+    from starlette.requests import Request
+
+    def request(headers, query=b""):
+        return Request({"type": "http", "query_string": query,
+                        "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+
+    creds = {"authorization": basic("admin", PASSWORD)}
+    assert await main.authenticate_mcp(request(creds)) is None
+    assert await main.authenticate_mcp(request({**creds, "x-mcp-token": "yanlis-xxx"})) is None
+    assert await main.authenticate_mcp(request({**creds, "x-mcp-token": LOGIN_TOKEN})) == "admin"
+    assert await main.authenticate_mcp(request(creds, f"token={LOGIN_TOKEN}".encode())) == "admin"
+
+
+@pytest.mark.anyio
+async def test_changing_token_logs_everyone_out(tmp_path):
+    store = str(tmp_path / "oauth.json")
+    first = auth.CockpitOAuthProvider(store, "x", token_policy="eski-xxx")
+    tokens = first._issue("c", ["mcp"], "admin", None)
+
+    same = auth.CockpitOAuthProvider(store, "x", token_policy="eski-xxx")
+    assert await same.load_access_token(tokens.access_token) is not None
+
+    changed = auth.CockpitOAuthProvider(store, "x", token_policy="yeni-xxx")
+    assert await changed.load_access_token(tokens.access_token) is None
+    assert changed.refresh_tokens == {}
+    # Kalıcı olarak da silinmiş olmalı
+    reloaded = auth.CockpitOAuthProvider(store, "x", token_policy="yeni-xxx")
+    assert await reloaded.load_access_token(tokens.access_token) is None

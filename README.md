@@ -40,7 +40,7 @@ sudo firewall-cmd --permanent --add-service=cockpit && sudo firewall-cmd --reloa
 | `COCKPIT_AUTH_URL` | Girişleri doğrulayacak Cockpit. Varsayılan `https://host.docker.internal:9090` (gateway'in çalıştığı host makine). |
 | `COCKPIT_AUTH_VERIFY_TLS` | Bu Cockpit'in sertifikası doğrulansın mı (varsayılan `false`) |
 | `ALLOWED_USERS` | Gateway'e girebilecek Cockpit kullanıcıları (virgülle). **Boş bırakılırsa o makinede Cockpit'e girebilen her kullanıcı girebilir.** |
-| `MCP_API_KEY` | Opsiyonel sabit token (OAuth desteklemeyen istemciler için). Boşsa devre dışı. |
+| `MCP_API_KEY` | Cockpit girişine ek olarak istenen **erişim token'ı** (ikinci faktör). Uzun ve rastgele olmalı. Boşsa yalnızca Cockpit girişi yeter. Değiştirilirse tüm oturumlar kapanır. |
 | `SSH_LOGINS` | SSH yedeğinde denenecek kullanıcılar ve key klasörleri. Varsayılan: `root:/root/.ssh,bmericc:/home/bmericc/.ssh` |
 
 `docker-compose.yml`, host makineye `host.docker.internal` adıyla erişim sağlar. Ayrıca `/root/.ssh` ve `/home/bmericc/.ssh` klasörlerini salt okunur bağlar.
@@ -49,18 +49,21 @@ sudo firewall-cmd --permanent --add-service=cockpit && sudo firewall-cmd --reloa
 
 MCP uç noktası: `https://<PUBLIC_URL>/sse`
 
+Giriş iki parçalıdır: **Cockpit kullanıcı adı/şifresi** ve `MCP_API_KEY` tanımlıysa **erişim token'ı**. Token tek başına giriş sağlamaz. Böylece zayıf bir Cockpit şifresi tek başına yetmez.
+
 | Yöntem | Kullanım |
 | --- | --- |
-| **OAuth 2.1** (önerilen) | İstemci bağlanınca tarayıcıda Cockpit giriş sayfası açılır. Giriş yapılınca istemci token alır (1 saat; refresh token 30 gün). |
-| **HTTP Basic** | `Authorization: Basic base64(kullanıcı:şifre)`, Cockpit hesabıyla |
-| **Sabit token** | `MCP_API_KEY` tanımlıysa `Authorization: Bearer <token>` veya `?token=<token>` |
+| **OAuth 2.1** (önerilen) | İstemci bağlanınca tarayıcıda giriş sayfası açılır: kullanıcı adı, Cockpit parolası ve gateway parolası (`MCP_API_KEY`). Giriş yapılınca istemci token alır (1 saat; refresh token 30 gün). |
+| **HTTP Basic** | `Authorization: Basic base64(kullanıcı:şifre)` + erişim token'ı (`X-MCP-Token: <token>` başlığı veya `?token=<token>`) |
 
-**claude.ai:** *Settings → Connectors → Add custom connector* bölümüne `https://<PUBLIC_URL>/sse` adresini girin. Bağlanırken açılan sayfada Cockpit hesabınızla giriş yapın.
+Gateway parolası MCP adresine eklenirse (`https://<PUBLIC_URL>/sse?token=<MCP_API_KEY>`) giriş sayfası onu ayrıca sormaz; yalnızca kullanıcı adı ve Cockpit parolası istenir. Adreste yoksa veya yanlışsa sayfada ikinci parola alanı çıkar. Web panelinde de aynısı geçerlidir (`/login?token=<token>`).
+
+**claude.ai:** *Settings → Connectors → Add custom connector* bölümüne `https://<PUBLIC_URL>/sse?token=<token>` adresini girin. Bağlanırken açılan sayfada Cockpit hesabınızla giriş yapın.
 
 **Claude Code:**
 
 ```bash
-claude mcp add --transport sse rhel-gateway https://<PUBLIC_URL>/sse
+claude mcp add --transport sse rhel-gateway "https://<PUBLIC_URL>/sse?token=<token>"
 ```
 
 OAuth akışı uç noktaları:
@@ -148,6 +151,7 @@ python -m pytest
 ## Güvenlik notları
 
 - `ALLOWED_USERS`'ı mutlaka doldurun. Gateway, kayıtlı sunucularda yönetici yetkisiyle işlem yapabilir.
+- `MCP_API_KEY`'i uzun ve rastgele seçin (örn. `openssl rand -hex 32`). Cockpit şifresi zayıf olsa bile token olmadan giriş yapılamaz. Token yanlışsa şifre Cockpit'e hiç gönderilmez.
 - Cockpit bağlantılarında TLS doğrulaması varsayılan olarak kapalıdır (kendinden imzalı sertifikalar için). SSH yedeğinde sunucu anahtarı doğrulanmaz (`known_hosts=None`). İkisi de güvenilir ağ varsayar.
 - `SECRET_KEY`'i gizli tutun ve değiştirmeyin.
 
