@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0d9488"/></marker>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9ca3af"/></marker>
+    <marker id="a0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.10"/></filter>
+  </defs>
+  <rect width="1200" height="640" fill="#f8fafc"/>
+  <text x="600" y="48" text-anchor="middle" font-size="26" font-weight="700" fill="#0f172a">RHEL MCP Gateway nasıl çalışıyor?</text>
+
+  <!-- Claude -->
+  <g filter="url(#sh)">
+    <rect x="40" y="230" width="210" height="150" rx="16" fill="#fff" stroke="#e2e8f0" stroke-width="2"/>
+  </g>
+  <circle cx="145" cy="275" r="22" fill="#d97757"/>
+  <text x="145" y="283" text-anchor="middle" font-size="20" fill="#fff">💬</text>
+  <text x="145" y="325" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">Claude</text>
+  <text x="145" y="350" text-anchor="middle" font-size="14" fill="#64748b">MCP istemcisi</text>
+
+  <!-- Claude -> Gateway -->
+  <line x1="252" y1="305" x2="388" y2="305" stroke="#475569" stroke-width="3" marker-end="url(#a0)"/>
+  <text x="320" y="290" text-anchor="middle" font-size="14" font-weight="600" fill="#334155">MCP</text>
+  <text x="320" y="328" text-anchor="middle" font-size="12" fill="#64748b">SSE + OAuth 2.1</text>
+
+  <!-- Gateway -->
+  <g filter="url(#sh)">
+    <rect x="392" y="170" width="290" height="270" rx="16" fill="#fff" stroke="#2563eb" stroke-width="2.5"/>
+  </g>
+  <rect x="392" y="170" width="290" height="52" rx="16" fill="#2563eb"/>
+  <rect x="392" y="200" width="290" height="22" fill="#2563eb"/>
+  <text x="537" y="203" text-anchor="middle" font-size="19" font-weight="700" fill="#fff">MCP Gateway (Docker)</text>
+  <g font-size="14" fill="#334155">
+    <text x="414" y="254">🛠  20 araç: servis, log, paket,</text>
+    <text x="444" y="274">güncelleme, firewall, komut</text>
+    <text x="414" y="304">✋  Değişiklikler confirm ile</text>
+    <text x="414" y="334">🔑  Şifreli parola ve SSH anahtarları</text>
+    <text x="414" y="364">🌐  Opsiyonel proxy (HTTP / SOCKS5)</text>
+    <text x="414" y="394">🖥  Web paneli: sunucu ekle, test et</text>
+  </g>
+
+  <!-- Login -->
+  <line x1="537" y1="442" x2="537" y2="512" stroke="#475569" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#a0)"/>
+  <text x="547" y="482" font-size="12" fill="#64748b">giriş doğrulama</text>
+  <g filter="url(#sh)">
+    <rect x="417" y="516" width="240" height="78" rx="14" fill="#fff" stroke="#e2e8f0" stroke-width="2"/>
+  </g>
+  <text x="537" y="546" text-anchor="middle" font-size="15" font-weight="700" fill="#0f172a">Cockpit hesabı</text>
+  <text x="537" y="570" text-anchor="middle" font-size="12.5" fill="#64748b">+ gateway parolası (2. faktör)</text>
+
+  <!-- Server -->
+  <g filter="url(#sh)">
+    <rect x="930" y="150" width="235" height="310" rx="16" fill="#fff" stroke="#e2e8f0" stroke-width="2"/>
+  </g>
+  <text x="1047" y="186" text-anchor="middle" font-size="19" font-weight="700" fill="#0f172a">Linux sunucu</text>
+  <text x="1047" y="208" text-anchor="middle" font-size="12.5" fill="#64748b">RHEL / Debian</text>
+  <rect x="955" y="228" width="185" height="62" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="1047" y="255" text-anchor="middle" font-size="15" font-weight="700" fill="#1d4ed8">Cockpit</text>
+  <text x="1047" y="276" text-anchor="middle" font-size="12" fill="#3b82f6">:9090</text>
+  <rect x="955" y="358" width="185" height="62" rx="10" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="1047" y="385" text-anchor="middle" font-size="15" font-weight="700" fill="#334155">SSH</text>
+  <text x="1047" y="406" text-anchor="middle" font-size="12" fill="#64748b">:22</text>
+  <!-- inside server: ssh -> cockpit -->
+  <path d="M1047,356 L1047,294" stroke="#0d9488" stroke-width="2.5" stroke-dasharray="5 4" marker-end="url(#a2)"/>
+
+  <!-- Path 1: direct cockpit -->
+  <line x1="684" y1="240" x2="951" y2="252" stroke="#2563eb" stroke-width="3.5" marker-end="url(#a1)"/>
+  <circle cx="740" cy="222" r="13" fill="#2563eb"/><text x="740" y="227" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">1</text>
+  <text x="760" y="227" font-size="14" font-weight="600" fill="#1d4ed8">Doğrudan Cockpit</text>
+
+  <!-- Path 2: ssh tunnel -->
+  <path d="M684,315 C800,315 860,372 951,378" fill="none" stroke="#0d9488" stroke-width="3.5" marker-end="url(#a2)"/>
+  <circle cx="740" cy="300" r="13" fill="#0d9488"/><text x="740" y="305" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">2</text>
+  <text x="760" y="305" font-size="14" font-weight="600" fill="#0f766e">SSH tüneli → Cockpit</text>
+
+  <!-- Path 3: plain ssh -->
+  <path d="M684,410 C800,410 860,402 951,400" fill="none" stroke="#9ca3af" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#a3)"/>
+  <circle cx="740" cy="438" r="13" fill="#9ca3af"/><text x="740" y="443" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">3</text>
+  <text x="760" y="443" font-size="14" font-weight="600" fill="#6b7280">Düz SSH (son yedek)</text>
+
+  <!-- legend -->
+  <g font-size="13" fill="#475569">
+    <text x="760" y="520" font-weight="700" fill="#0f172a">Bağlantı sırası</text>
+    <text x="760" y="545">1 · 9090 açıksa doğrudan Cockpit</text>
+    <text x="760" y="567">2 · Kapalıysa SSH içinden sunucunun Cockpit'i</text>
+    <text x="760" y="589">3 · O da olmazsa komutlar SSH ile (sudo -n)</text>
+  </g>
+</svg>
