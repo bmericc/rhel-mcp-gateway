@@ -212,3 +212,93 @@ def test_encrypt_roundtrip():
     assert token != PASSWORD
     assert main.decrypt_secret(token) == PASSWORD
     assert main.decrypt_secret("bozuk") is None
+
+
+# --- SSH tüneli içinden Cockpit ---
+
+class Listener:
+    def __init__(self, port):
+        self.port, self.closed = port, False
+
+    def get_port(self):
+        return self.port
+
+    def close(self):
+        self.closed = True
+
+
+class TunnelSSHConn(SSHConn):
+    """forward_local_port, sunucudaki Cockpit yerine sahte cockpit-ws'e yönlenir."""
+
+    def __init__(self, commands, cockpit_port, forwards):
+        super().__init__(commands)
+        self.cockpit_port, self.forwards = cockpit_port, forwards
+
+    async def forward_local_port(self, listen_host, listen_port, dest_host, dest_port):
+        self.forwards.append((listen_host, listen_port, dest_host, dest_port))
+        listener = Listener(self.cockpit_port)
+        self.forwards.append(listener)
+        return listener
+
+
+@pytest.fixture
+def tunnel_ssh(cockpit, monkeypatch):
+    commands, forwards = [], []
+    monkeypatch.setattr(main.asyncssh, "connect",
+                        lambda host, **kw: TunnelSSHConn(commands, cockpit.port, forwards))
+    return commands, forwards
+
+
+async def test_cockpit_over_ssh_tunnel_when_direct_unreachable(cockpit, servers_file, tunnel_ssh):
+    commands, forwards = tunnel_ssh
+    # Cockpit portu dışarıya kapalı (doğrudan bağlantı reddedilir)
+    servers_file(cockpit_server("http://127.0.0.1:1"))
+    data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
+    assert data["connection"] == {"via": "cockpit-ssh", "user": "admin", "ssh_user": "root"}
+    # Tünel sunucunun kendi Cockpit portuna açılır, komutlar Cockpit'ten çalışır
+    assert forwards[0] == ("127.0.0.1", 0, "localhost", 1)
+    assert forwards[1].closed
+    assert cockpit.fake.opened and commands == []
+
+
+async def test_direct_cockpit_preferred_over_tunnel(cockpit, servers_file, tunnel_ssh):
+    commands, forwards = tunnel_ssh
+    servers_file(cockpit_server(cockpit.url))
+    data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
+    assert data["connection"]["via"] == "cockpit"
+    assert forwards == []
+
+
+async def test_unreachable_direct_cockpit_is_remembered(cockpit, servers_file, tunnel_ssh, monkeypatch):
+    servers_file(cockpit_server("http://127.0.0.1:1"))
+    await call("failed_services", {"server_name": "box"})
+    attempts = []
+    original = main.connect_cockpit_direct
+    monkeypatch.setattr(main, "connect_cockpit_direct", lambda *a, **kw: attempts.append(1) or original(*a, **kw))
+    data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
+    # İkinci çağrıda doğrudan bağlantı beklenmeden tünel kullanılır
+    assert attempts == []
+    assert data["connection"]["via"] == "cockpit-ssh"
+
+
+async def test_wrong_password_does_not_try_tunnel(cockpit, servers_file, tunnel_ssh):
+    commands, forwards = tunnel_ssh
+    servers_file(cockpit_server(cockpit.url, password=WRONG_PASSWORD))
+    data = json.loads((await call("failed_services", {"server_name": "box"})).content[0].text)
+    assert data["connection"]["via"] == "ssh"
+    assert forwards == []
+
+
+async def test_tunnel_failure_falls_back_to_plain_ssh(servers_file, ssh):
+    # Sahte SSH bağlantısı port yönlendirmeyi desteklemiyor: düz SSH ile devam
+    servers_file(cockpit_server("http://127.0.0.1:1"))
+    text = (await call("run_remote_command", {"server_name": "box", "command": "uptime", "confirm": True})).content[0].text
+    assert "Via: ssh" in text
+    assert "SSH tüneli üzerinden de olmadı" in text
+
+
+async def test_check_server_reports_tunnel(cockpit, tunnel_ssh, ssh_dirs):
+    cfg = cockpit_server("http://127.0.0.1:1")["box"]
+    result = await main.check_server(cfg)
+    assert result["ok"] is True and result["via"] == "cockpit-ssh"
+    assert not result.get("warning")

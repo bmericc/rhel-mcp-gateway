@@ -84,7 +84,7 @@ class CockpitSession:
                     headers=headers,
                 )
         except httpx.HTTPError as e:
-            raise CockpitError(f"Cockpit'e bağlanılamadı ({self.url}): {e}") from e
+            raise CockpitError(f"Cockpit'e bağlanılamadı ({self.url}): {_describe(e)}") from e
         if resp.status_code == 401:
             raise CockpitAuthError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
         if resp.status_code != 200 or "cockpit" not in resp.cookies:
@@ -132,7 +132,7 @@ class CockpitSession:
             init = await asyncio.wait_for(self._ws.recv(), self.connect_timeout)
         except Exception as e:
             await self.close()
-            raise CockpitError(f"Cockpit WebSocket bağlantısı kurulamadı ({ws_url}): {e}") from e
+            raise CockpitError(f"Cockpit WebSocket bağlantısı kurulamadı ({ws_url}): {_describe(e)}") from e
 
         channel, payload = _split(init)
         message = json.loads(payload) if channel == "" else {}
@@ -257,6 +257,13 @@ class CockpitSession:
                 hint = "yönetici yetkisi alınamadı (kullanıcının sudo yetkisi olmalı)"
             stderr = (f"Cockpit hatası: {problem}" + (f" ({hint})" if hint else "") + (f"\n{stderr}" if stderr else ""))
         return CommandResult(self.user, exit_status, "".join(stdout), stderr, "cockpit")
+
+
+def _describe(e: Exception) -> str:
+    """Hata mesajı boş gelen istisnalar (örn. httpx.ConnectTimeout) için anlaşılır açıklama."""
+    if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError, TimeoutError)):
+        return "zaman aşımı (port kapalı veya güvenlik duvarı engelliyor olabilir)"
+    return str(e) or type(e).__name__
 
 
 def _split(raw) -> tuple[str, str]:

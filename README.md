@@ -91,9 +91,11 @@ Web panelinde (`https://<PUBLIC_URL>/`) Cockpit hesabınızla giriş yapın. Ard
 
 Sunucular `data/servers.json` dosyasında tutulur ve bu dosya git'e alınmaz. Cockpit şifreleri dosyada şifrelidir; `list_servers` aracı şifreleri göstermez.
 
-**Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır. Cockpit tanımlıysa Cockpit'e giriş yapılıp basit bir komut çalıştırılır; tanımlı değilse SSH denenir. Bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
+**Bağlantı sırası:** Cockpit tanımlı sunucularda önce Cockpit'e doğrudan bağlanılır. Ulaşılamazsa (örneğin 9090 güvenlik duvarında kapalıysa) SSH ile bağlanılıp bağlantının içinden sunucunun kendi Cockpit'ine (`localhost:9090`) tünel açılır ve komutlar yine Cockpit üzerinden çalışır; böylece Cockpit portunu dışarıya açmak gerekmez. O da olmazsa komutlar düz SSH ile (`sudo -n`) çalışır. Doğrudan Cockpit'e ulaşılamadığı 10 dakika hatırlanır; bu sürede her çağrıda zaman aşımı beklenmeden tünel kullanılır. Cockpit şifresi reddedilirse tünel denenmez.
 
-**Gateway'in dış IP adresi:** Panelin üstünde gateway'in internete çıktığı IP adresi gösterilir. Bu, uzaktaki sunucuların güvenlik duvarında Cockpit (9090/tcp) ve SSH (22/tcp) için izin verilmesi gereken adrestir. Adres 10 dakika önbelleklenir; *Yenile* düğmesiyle tekrar sorgulanabilir. Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.
+**Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır ve aynı sıra denenir. Yalnızca düz SSH çalışıyorsa sunucu kaydedilir ama ⚠ ile uyarı gösterilir. Hiç bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
+
+**Gateway'in dış IP adresi:** Panelin üstünde gateway'in internete çıktığı IP adresi gösterilir. Bu, uzaktaki sunucuların güvenlik duvarında Cockpit (9090/tcp) ve SSH (22/tcp) için izin verilmesi gereken adrestir (SSH açıksa Cockpit tünelden kullanılabildiği için 9090 zorunlu değildir). Adres 10 dakika önbelleklenir; *Yenile* düğmesiyle tekrar sorgulanabilir. Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.
 
 ### Bağlantı proxy'si
 
