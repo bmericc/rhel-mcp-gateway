@@ -118,12 +118,14 @@ async def test_socks5h_sends_hostname_to_proxy():
 @pytest.mark.parametrize("kind", ["http", "socks5"])
 async def test_proxy_authentication(kind):
     server, port = await echo_server()
-    p = proxy(kind, username="ali", password=PASSWORD)
+    user = "ali"
+    good, bad = (user, PASSWORD), (user, WRONG_PASSWORD)
+    p = proxy(kind, username=good[0], password=good[1])
     try:
-        sock = await outbound_proxy.open_tunnel(p.url(auth=("ali", PASSWORD)), "127.0.0.1", port, timeout=5)
+        sock = await outbound_proxy.open_tunnel(p.url(auth=good), "127.0.0.1", port, timeout=5)
         assert await roundtrip(sock) == b"echo:merhaba"
         with pytest.raises(outbound_proxy.ProxyError):
-            await outbound_proxy.open_tunnel(p.url(auth=("ali", WRONG_PASSWORD)), "127.0.0.1", port, timeout=5)
+            await outbound_proxy.open_tunnel(p.url(auth=bad), "127.0.0.1", port, timeout=5)
         with pytest.raises(outbound_proxy.ProxyError):
             await outbound_proxy.open_tunnel(p.url(), "127.0.0.1", port, timeout=5)
     finally:
