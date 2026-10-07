@@ -70,7 +70,13 @@ def shared_keys_file(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def no_public_ip_lookup(monkeypatch):
     """Panel testleri dış IP servislerine gerçekten istek atmasın (test_public_ip.py kendi sahtesini kurar)."""
-    async def offline(url):
+    async def offline(url, proxy=None):
         return None
 
     monkeypatch.setattr(main, "_fetch_ip", offline)
+
+
+@pytest.fixture(autouse=True)
+def no_default_proxy(monkeypatch):
+    """Testler ortamdaki OUTBOUND_PROXY ayarından etkilenmesin."""
+    monkeypatch.setattr(main, "OUTBOUND_PROXY", "")

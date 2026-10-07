@@ -41,6 +41,7 @@ sudo firewall-cmd --permanent --add-service=cockpit && sudo firewall-cmd --reloa
 | `COCKPIT_AUTH_VERIFY_TLS` | Bu Cockpit'in sertifikası doğrulansın mı (varsayılan `false`) |
 | `ALLOWED_USERS` | Gateway'e girebilecek Cockpit kullanıcıları (virgülle). **Boş bırakılırsa o makinede Cockpit'e girebilen her kullanıcı girebilir.** |
 | `MCP_API_KEY` | Cockpit girişine ek olarak istenen **erişim token'ı** (ikinci faktör). Uzun ve rastgele olmalı. Boşsa yalnızca Cockpit girişi yeter. Değiştirilirse tüm oturumlar kapanır. |
+| `OUTBOUND_PROXY` | Opsiyonel. Sunuculara giden bağlantılar için varsayılan proxy (`socks5://`, `socks5h://`, `http://`). Bkz. *Bağlantı proxy'si*. |
 | `SSH_LOGINS` | SSH yedeğinde denenecek kullanıcılar ve key klasörleri. Varsayılan: `root:/root/.ssh,bmericc:/home/bmericc/.ssh` |
 
 `docker-compose.yml`, host makineye `host.docker.internal` adıyla erişim sağlar. Ayrıca `/root/.ssh` ve `/home/bmericc/.ssh` klasörlerini salt okunur bağlar.
@@ -93,6 +94,15 @@ Sunucular `data/servers.json` dosyasında tutulur ve bu dosya git'e alınmaz. Co
 **Bağlantı kontrolü:** Kaydet'e basınca sunucuya gerçekten bağlanılır. Cockpit tanımlıysa Cockpit'e giriş yapılıp basit bir komut çalıştırılır; tanımlı değilse SSH denenir. Bağlantı kurulamazsa kayıt yapılmaz ve hata gösterilir. Sunucu o an kapalıysa *Bağlantıyı test etmeden kaydet* seçeneği kullanılabilir. Sunucu listesindeki *Test et* düğmesi bağlantıyı istendiği zaman yeniden dener ve son durumu tabloda gösterir.
 
 **Gateway'in dış IP adresi:** Panelin üstünde gateway'in internete çıktığı IP adresi gösterilir. Bu, uzaktaki sunucuların güvenlik duvarında Cockpit (9090/tcp) ve SSH (22/tcp) için izin verilmesi gereken adrestir. Adres 10 dakika önbelleklenir; *Yenile* düğmesiyle tekrar sorgulanabilir. Aynı yerel ağdaki sunucular ise gateway'i çalıştıran makinenin yerel IP adresini görür.
+
+### Bağlantı proxy'si
+
+Sunuculara giden Cockpit ve SSH bağlantıları bir proxy üzerinden yapılabilir. Böylece sunucular gateway yerine proxy'nin IP adresini görür; güvenlik duvarında tek bir sabit adrese izin vermek yeterli olur.
+
+- **Varsayılan proxy:** `.env`'de `OUTBOUND_PROXY` ile tanımlanır ve tüm sunuculara uygulanır.
+- **Sunucu bazında:** panelde *Bağlantı proxy'si* alanı. `socks5://host:1080` gibi bir adres, `direct` (proxysiz) ya da `default` (varsayılana dön) yazılabilir. Boş bırakılırsa mevcut ayar korunur.
+- **Desteklenen türler:** `http://` (HTTP CONNECT), `socks5://` (hedef adı gateway'de çözülür), `socks5h://` (hedef adı proxy'de çözülür). Kullanıcı adı/parola adreste verilebilir; sunucu kayıtlarında şifreli saklanır, panelde ve `list_servers` çıktısında parola gizlenir.
+- **Çıkış IP'si:** varsayılan proxy tanımlıysa panel, proxy üzerinden görünen çıkış IP adresini de gösterir.
 
 ### Ortak SSH anahtarları
 

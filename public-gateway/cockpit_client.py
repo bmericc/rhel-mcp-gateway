@@ -9,6 +9,7 @@ Akış:
 Mesaj biçimi "<kanal>\\n<içerik>"; kontrol mesajları boş kanal adıyla JSON olarak gelir.
 """
 import asyncio
+import base64
 import itertools
 import json
 import ssl
@@ -16,6 +17,9 @@ from typing import Any
 
 import httpx
 import websockets
+from urllib.parse import urlsplit
+
+import outbound_proxy
 
 from fleet_tools import CommandResult
 
@@ -28,19 +32,23 @@ class CockpitAuthError(CockpitError):
     """Kullanıcı adı veya şifre Cockpit tarafından reddedildi."""
 
 
-async def check_login(url: str, user: str, password: str, verify_tls: bool = False, timeout: float = 10) -> None:
+async def check_login(url: str, user: str, password: str, verify_tls: bool = False, timeout: float = 10,
+                      proxy: str | None = None) -> None:
     """Cockpit'e giriş yapılabiliyorsa sessizce döner.
 
     Şifre yanlışsa CockpitAuthError, Cockpit'e ulaşılamazsa CockpitError fırlatır.
     """
-    session = CockpitSession(url, user, password, verify_tls=verify_tls, connect_timeout=timeout)
+    session = CockpitSession(url, user, password, verify_tls=verify_tls, connect_timeout=timeout, proxy=proxy)
     # Sadece doğrulama: superuser köprüsü başlatılmasın
     await session.login(superuser=False)
 
 
 class CockpitSession:
-    def __init__(self, url: str, user: str, password: str, verify_tls: bool = False, connect_timeout: float = 10):
+    def __init__(self, url: str, user: str, password: str, verify_tls: bool = False, connect_timeout: float = 10,
+                 proxy: str | None = None):
         self.url = url.rstrip("/")
+        # Doluysa Cockpit'e bu proxy üzerinden bağlanılır (bkz. outbound_proxy)
+        self.proxy = proxy
         self.user = user
         self.password = password
         self.verify_tls = verify_tls
@@ -61,9 +69,11 @@ class CockpitSession:
             ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
-    async def login(self, superuser: bool = True) -> httpx.Response:
-        """Sadece HTTP girişini yapar; başarılıysa "cockpit" çerezini içeren yanıtı döner."""
+    async def login(self, superuser: bool = True) -> str:
+        """Sadece HTTP girişini yapar; başarılıysa "cockpit" çerezinin değerini döner."""
         headers = {"X-Superuser": "any" if superuser else "none"}
+        if self.proxy:
+            return await self._login_via_proxy(headers)
         try:
             async with httpx.AsyncClient(verify=self._ssl_context() or True, trust_env=False,
                                          timeout=self.connect_timeout) as client:
@@ -79,20 +89,45 @@ class CockpitSession:
             raise CockpitAuthError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
         if resp.status_code != 200 or "cockpit" not in resp.cookies:
             raise CockpitError(f"Cockpit girişi başarısız ({self.url}): HTTP {resp.status_code}")
-        return resp
+        return resp.cookies["cockpit"]
+
+    async def _login_via_proxy(self, headers: dict) -> str:
+        token = base64.b64encode(f"{self.user}:{self.password}".encode()).decode()
+        try:
+            status, resp_headers, _ = await outbound_proxy.http_get(
+                self.proxy, f"{self.url}/cockpit/login",
+                headers={**headers, "Authorization": f"Basic {token}"},
+                ssl_context=self._ssl_context(), timeout=self.connect_timeout,
+            )
+        except outbound_proxy.ProxyError as e:
+            raise CockpitError(f"Cockpit'e proxy üzerinden bağlanılamadı ({self.url}): {e}") from e
+        if status == 401:
+            raise CockpitAuthError(f"Cockpit girişi reddedildi ({self.user}@{self.url})")
+        for name, value in resp_headers:
+            if name.lower() == "set-cookie" and value.startswith("cockpit="):
+                if status == 200:
+                    return value.split(";", 1)[0][len("cockpit="):]
+        raise CockpitError(f"Cockpit girişi başarısız ({self.url}): HTTP {status}")
 
     async def connect(self):
-        resp = await self.login()
+        cookie = await self.login()
 
         ws_url = "ws" + self.url[len("http"):] + "/cockpit/socket"
         try:
+            extra = {"proxy": None}
+            if self.proxy:
+                parts = urlsplit(self.url)
+                port = parts.port or (443 if parts.scheme == "https" else 80)
+                extra = {"sock": await outbound_proxy.open_tunnel(self.proxy, parts.hostname, port, self.connect_timeout)}
+                if parts.scheme == "https":
+                    extra["server_hostname"] = parts.hostname
             self._ws = await asyncio.wait_for(websockets.connect(
                 ws_url,
                 subprotocols=["cockpit1"],
-                additional_headers={"Cookie": f"cockpit={resp.cookies['cockpit']}", "Origin": self.url},
+                additional_headers={"Cookie": f"cockpit={cookie}", "Origin": self.url},
                 ssl=self._ssl_context(),
-                proxy=None,
                 max_size=None,
+                **extra,
             ), self.connect_timeout)
             init = await asyncio.wait_for(self._ws.recv(), self.connect_timeout)
         except Exception as e:
