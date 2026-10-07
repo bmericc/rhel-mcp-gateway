@@ -7,10 +7,10 @@ import hashlib
 import secrets
 import ipaddress
 import shlex
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 import asyncio
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
@@ -325,33 +325,107 @@ def make_cockpit_runner(session: cockpit_client.CockpitSession) -> fleet_tools.R
         return await session.spawn(argv, superuser=privileged, timeout=timeout)
     return run
 
+# Doğrudan Cockpit'e ulaşılamayan sunucularda her çağrıda zaman aşımı beklenmesin:
+# başarısızlık bir süre hatırlanır ve bu sürede doğrudan SSH tüneli kullanılır.
+COCKPIT_DOWN_TTL = 600
+_cockpit_direct_down: Dict[str, tuple[float, str]] = {}
+
+def _cockpit_down_key(cfg: Dict[str, Any]) -> str:
+    return f"{cockpit_url(cfg)}|{cfg.get('proxy', '')}"
+
+def cockpit_password(cfg: Dict[str, Any]) -> str | None:
+    return decrypt_secret(cfg.get("cockpit_password", ""))
+
+COCKPIT_PASSWORD_UNREADABLE = "Cockpit şifresi çözülemedi (şifre girilmemiş ya da SECRET_KEY değişmiş olabilir)."
+
+async def connect_cockpit_direct(cfg: Dict[str, Any], password: str,
+                                 connect_timeout: float = 10) -> cockpit_client.CockpitSession:
+    """Cockpit'e doğrudan (gerekirse proxy ile) bağlanır. Sonuç tünel kararı için hatırlanır."""
+    key = _cockpit_down_key(cfg)
+    try:
+        session = cockpit_client.CockpitSession(
+            cockpit_url(cfg), cfg["cockpit_user"], password,
+            verify_tls=bool(cfg.get("cockpit_verify_tls")), connect_timeout=connect_timeout,
+            proxy=server_proxy(cfg),
+        )
+        await session.connect()
+    except cockpit_client.CockpitAuthError:
+        raise
+    except outbound_proxy.ProxyError as e:
+        raise cockpit_client.CockpitError(str(e)) from e
+    except cockpit_client.CockpitError as e:
+        _cockpit_direct_down[key] = (time.time() + COCKPIT_DOWN_TTL, str(e))
+        raise
+    _cockpit_direct_down.pop(key, None)
+    return session
+
+def cockpit_recently_down(cfg: Dict[str, Any]) -> str | None:
+    entry = _cockpit_direct_down.get(_cockpit_down_key(cfg))
+    if entry and entry[0] > time.time():
+        return entry[1]
+    return None
+
+@asynccontextmanager
+async def cockpit_over_ssh(cfg: Dict[str, Any], conn, password: str, connect_timeout: float = 10):
+    """SSH bağlantısının içinden sunucunun kendi Cockpit'ine (localhost) bağlanır.
+
+    Böylece Cockpit portunu (9090) dışarıya açmak gerekmez. Bağlantı SSH ile korunduğu için
+    tünel ucunda sertifika doğrulanmaz.
+    """
+    parts = urlsplit(cockpit_url(cfg))
+    port = parts.port or 9090
+    listener = await conn.forward_local_port("127.0.0.1", 0, "localhost", port)
+    try:
+        session = cockpit_client.CockpitSession(
+            f"{parts.scheme}://127.0.0.1:{listener.get_port()}", cfg["cockpit_user"], password,
+            verify_tls=False, connect_timeout=connect_timeout,
+        )
+        await session.connect()
+        try:
+            yield session
+        finally:
+            await session.close()
+    finally:
+        listener.close()
+
 @asynccontextmanager
 async def open_runner(cfg: Dict[str, Any]):
-    """Önce Cockpit (tanımlıysa), bağlanılamazsa SSH. (runner, bağlantı bilgisi) döner."""
+    """Sıra: Cockpit (doğrudan) -> SSH tüneli içinden Cockpit -> düz SSH. (runner, bağlantı bilgisi) döner."""
     cockpit_error = None
+    password = None
     if cfg.get("cockpit_user"):
-        password = decrypt_secret(cfg.get("cockpit_password", ""))
-        session = None
+        password = cockpit_password(cfg)
         if password is None:
-            cockpit_error = "Cockpit şifresi çözülemedi (şifre girilmemiş ya da SECRET_KEY değişmiş olabilir)."
+            cockpit_error = COCKPIT_PASSWORD_UNREADABLE
+        elif (down := cockpit_recently_down(cfg)) is not None:
+            cockpit_error = down
         else:
+            session = None
             try:
-                candidate = cockpit_client.CockpitSession(
-                    cockpit_url(cfg), cfg["cockpit_user"], password,
-                    verify_tls=bool(cfg.get("cockpit_verify_tls")), proxy=server_proxy(cfg),
-                )
-                session = await candidate.connect()
-            except (cockpit_client.CockpitError, outbound_proxy.ProxyError) as e:
+                session = await connect_cockpit_direct(cfg, password)
+            except cockpit_client.CockpitAuthError as e:
+                # Şifre yanlış: tünelden de aynı sonuç alınır
+                cockpit_error, password = str(e), None
+            except cockpit_client.CockpitError as e:
                 cockpit_error = str(e)
-        if session is not None:
-            try:
-                yield make_cockpit_runner(session), {"via": "cockpit", "user": cfg["cockpit_user"]}
-            finally:
-                await session.close()
-            return
+            if session is not None:
+                try:
+                    yield make_cockpit_runner(session), {"via": "cockpit", "user": cfg["cockpit_user"]}
+                finally:
+                    await session.close()
+                return
 
     try:
-        async with ssh_session(cfg) as (user, conn):
+        async with ssh_session(cfg) as (user, conn), AsyncExitStack() as stack:
+            session = None
+            if password is not None:
+                try:
+                    session = await stack.enter_async_context(cockpit_over_ssh(cfg, conn, password))
+                except Exception as e:
+                    cockpit_error = f"{cockpit_error}; SSH tüneli üzerinden de olmadı: {str(e) or type(e).__name__}"
+            if session is not None:
+                yield make_cockpit_runner(session), {"via": "cockpit-ssh", "user": cfg["cockpit_user"], "ssh_user": user}
+                return
             info = {"via": "ssh", "user": user}
             if cockpit_error:
                 info["cockpit_error"] = cockpit_error
@@ -600,58 +674,68 @@ def public_ip_html(ips: Dict[str, str | None], proxy_ips: Dict[str, str | None] 
 async def check_server(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Sunucuya gerçekten bağlanıp basit bir komut çalıştırarak bilgileri doğrular.
 
-    MCP araçlarıyla aynı sıra izlenir: Cockpit tanımlıysa önce Cockpit, çalışmazsa SSH yedeği.
-    Yalnızca SSH ile bağlanılabiliyorsa sonuç başarılı ama "warning" işaretlidir.
+    MCP araçlarıyla aynı sıra izlenir: Cockpit (doğrudan), SSH tüneli içinden Cockpit, düz SSH.
+    Yalnızca düz SSH ile bağlanılabiliyorsa sonuç başarılı ama "warning" işaretlidir.
     """
     checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    async def try_ssh() -> str | None:
+    async def spawn_true(session) -> str | None:
+        result = await session.spawn(["true"], timeout=CHECK_TIMEOUT)
+        if result.exit_status != 0:
+            return f"Cockpit üzerinden komut çalıştırılamadı: {result.stderr.strip() or result.exit_status}"
+        return None
+
+    async def try_ssh(password: str | None) -> tuple[str | None, str | None]:
+        """(SSH hatası, tünel hatası). password verilirse SSH içinden Cockpit de denenir."""
+        tunnel_error = None
         try:
             async with ssh_session(cfg, connect_timeout=CHECK_TIMEOUT) as (user, conn):
+                if password is not None:
+                    try:
+                        async with cockpit_over_ssh(cfg, conn, password, CHECK_TIMEOUT) as session:
+                            tunnel_error = await spawn_true(session)
+                    except Exception as e:
+                        tunnel_error = str(e) or type(e).__name__
                 result = await make_runner(user, conn)("true", timeout=CHECK_TIMEOUT)
             if result.exit_status != 0:
-                return f"SSH komutu başarısız: {result.stderr.strip() or result.exit_status}"
-            return None
+                return f"SSH komutu başarısız: {result.stderr.strip() or result.exit_status}", tunnel_error
+            return None, tunnel_error
         except Exception as e:
-            return str(e)
+            return str(e), tunnel_error
 
     if cfg.get("cockpit_user"):
-        password = decrypt_secret(cfg.get("cockpit_password", ""))
+        password = cockpit_password(cfg)
         error = None
         if password is None:
             error = "Cockpit şifresi çözülemedi; şifreyi yeniden girin."
         else:
+            session = None
             try:
-                proxy = server_proxy(cfg)
-            except outbound_proxy.ProxyError as e:
-                proxy, error = None, str(e)
-            session = cockpit_client.CockpitSession(
-                cockpit_url(cfg), cfg["cockpit_user"], password,
-                verify_tls=bool(cfg.get("cockpit_verify_tls")), connect_timeout=CHECK_TIMEOUT,
-                proxy=proxy,
-            )
-            try:
-                if error:
-                    raise cockpit_client.CockpitError(error)
-                await session.connect()
-                result = await session.spawn(["true"], timeout=CHECK_TIMEOUT)
-                if result.exit_status != 0:
-                    error = f"Cockpit üzerinden komut çalıştırılamadı: {result.stderr.strip() or result.exit_status}"
+                session = await connect_cockpit_direct(cfg, password, CHECK_TIMEOUT)
+                error = await spawn_true(session)
+            except cockpit_client.CockpitAuthError as e:
+                # Şifre yanlış: tünel denemenin anlamı yok
+                error, password = str(e), None
             except cockpit_client.CockpitError as e:
                 error = str(e)
             finally:
-                await session.close()
+                if session is not None:
+                    await session.close()
         if error is None:
             return {"ok": True, "via": "cockpit", "message": "Cockpit bağlantısı başarılı.", "at": checked_at}
-        ssh_error = await try_ssh()
+        ssh_error, tunnel_error = await try_ssh(password)
+        if ssh_error is None and password is not None and tunnel_error is None:
+            return {"ok": True, "via": "cockpit-ssh", "at": checked_at,
+                    "message": "Cockpit SSH tüneli üzerinden bağlandı (Cockpit portu dışarıya kapalı)."}
         if ssh_error is None:
             # MCP araçları da bu durumda SSH yedeğiyle çalışır: sunucu kullanılabilir, ama uyarı gösterilir
+            detail = f" SSH tüneliyle Cockpit: {tunnel_error}" if tunnel_error else ""
             return {"ok": True, "warning": True, "via": "ssh",
-                    "message": f"SSH yedeği ile bağlanıldı; Cockpit çalışmıyor: {error}", "at": checked_at}
+                    "message": f"SSH yedeği ile bağlanıldı; Cockpit çalışmıyor: {error}.{detail}", "at": checked_at}
         return {"ok": False, "via": None, "message": f"{error} (SSH yedeği de çalışmıyor: {ssh_error})",
                 "at": checked_at}
 
-    ssh_error = await try_ssh()
+    ssh_error, _ = await try_ssh(None)
     if ssh_error is None:
         return {"ok": True, "via": "ssh", "message": "SSH bağlantısı başarılı.", "at": checked_at}
     return {"ok": False, "via": None, "message": ssh_error, "at": checked_at}

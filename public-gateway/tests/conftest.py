@@ -80,3 +80,11 @@ def no_public_ip_lookup(monkeypatch):
 def no_default_proxy(monkeypatch):
     """Testler ortamdaki OUTBOUND_PROXY ayarından etkilenmesin."""
     monkeypatch.setattr(main, "OUTBOUND_PROXY", "")
+
+
+@pytest.fixture(autouse=True)
+def no_cockpit_down_cache():
+    """Doğrudan Cockpit başarısızlık önbelleği testler arasında taşınmasın."""
+    main._cockpit_direct_down.clear()
+    yield
+    main._cockpit_direct_down.clear()
