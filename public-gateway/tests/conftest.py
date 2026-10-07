@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import audit_log  # noqa: E402
 import main  # noqa: E402
 
 
@@ -88,3 +89,10 @@ def no_cockpit_down_cache():
     main._cockpit_direct_down.clear()
     yield
     main._cockpit_direct_down.clear()
+
+
+@pytest.fixture(autouse=True)
+def audit_file(tmp_path, monkeypatch):
+    """İşlem kayıtları geçici bir dosyaya yazılsın; dönen fonksiyon kayıtları (en yenisi başta) okur."""
+    monkeypatch.setattr(audit_log, "LOG_FILE", str(tmp_path / "data" / "audit.log"))
+    return lambda **filters: audit_log.read(1000, **filters)[0]

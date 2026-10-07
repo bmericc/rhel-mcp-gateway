@@ -10,6 +10,7 @@ import shlex
 from urllib.parse import urlencode, urlsplit
 import asyncio
 import time
+from contextvars import ContextVar
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
@@ -21,6 +22,7 @@ import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
 import auth
+import audit_log
 import cockpit_client
 import outbound_proxy
 import fleet_tools
@@ -300,6 +302,29 @@ async def ssh_session(cfg: Dict[str, Any], connect_timeout: float = SSH_CONNECT_
 
     raise SSHError("SSH Kimlik Doğrulama Hatası, denenen kullanıcılar:\n" + "\n".join(denied))
 
+# --- İşlem kaydı (audit log) bağlamı ---
+# MCP bağlantısını açan kullanıcı; /sse isteğinde atanır, araç çağrıları aynı bağlamı devralır.
+_mcp_actor: ContextVar[Dict[str, Any]] = ContextVar("mcp_actor", default={})
+# Bir araç çağrısı sırasında sunucularda çalıştırılan komutlar (araç çağrısı dışında None)
+_command_log: ContextVar[list | None] = ContextVar("command_log", default=None)
+
+def _recorded(run: fleet_tools.Runner) -> fleet_tools.Runner:
+    """Runner'ı, çalıştırdığı komutları geçerli araç çağrısının kaydına ekleyecek şekilde sarar."""
+    async def wrapper(argv, privileged: bool = False, timeout: int = fleet_tools.DEFAULT_TIMEOUT):
+        result = await run(argv, privileged=privileged, timeout=timeout)
+        commands = _command_log.get()
+        if commands is not None:
+            commands.append({
+                "command": argv if isinstance(argv, str) else shlex.join(argv),
+                "as_root": privileged, "user": result.user, "via": result.via,
+                "exit_status": result.exit_status,
+            })
+        return result
+    return wrapper
+
+def request_actor(request: Request) -> Dict[str, Any]:
+    return {"ip": request.client.host if request.client else None}
+
 def make_runner(user: str, conn) -> fleet_tools.Runner:
     async def run(argv, privileged: bool = False, timeout: int = fleet_tools.DEFAULT_TIMEOUT):
         if isinstance(argv, str):
@@ -316,14 +341,14 @@ def make_runner(user: str, conn) -> fleet_tools.Runner:
         except asyncio.TimeoutError:
             return fleet_tools.CommandResult(user, None, "", f"Komut {timeout} saniyede zaman aşımına uğradı.", "ssh")
         return fleet_tools.CommandResult(user, result.exit_status, result.stdout or "", result.stderr or "", "ssh")
-    return run
+    return _recorded(run)
 
 def make_cockpit_runner(session: cockpit_client.CockpitSession) -> fleet_tools.Runner:
     async def run(argv, privileged: bool = False, timeout: int = fleet_tools.DEFAULT_TIMEOUT):
         if isinstance(argv, str):
             argv = ["sh", "-c", argv]
         return await session.spawn(argv, superuser=privileged, timeout=timeout)
-    return run
+    return _recorded(run)
 
 # Doğrudan Cockpit'e ulaşılamayan sunucularda her çağrıda zaman aşımı beklenmesin:
 # başarısızlık bir süre hatırlanır ve bu sürede doğrudan SSH tüneli kullanılır.
@@ -499,14 +524,39 @@ async def fleet_health(servers: Dict[str, Dict[str, Any]]) -> dict:
 
 @mcp_server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    servers = load_servers()
+    """Aracı çalıştırır ve çağrıyı (kim, hangi sunucu, hangi komutlar, sonuç) işlem kaydına yazar."""
     arguments = arguments or {}
+    commands: list = []
+    token = _command_log.set(commands)
+    started = time.monotonic()
+    status, content, error = "error", None, None
+    try:
+        content, status = await _call_tool(name, arguments)
+        return content
+    except Exception as e:
+        error = str(e) or type(e).__name__
+        raise
+    finally:
+        _command_log.reset(token)
+        server_name = arguments.get("server_name")
+        audit_log.record(
+            "mcp", name, status, **_mcp_actor.get(),
+            server=server_name if isinstance(server_name, str) else None,
+            args={k: v for k, v in arguments.items() if k != "server_name"},
+            commands=commands,
+            result=error or (content[0].text if content else None),
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
+
+async def _call_tool(name: str, arguments: dict) -> tuple[list[types.TextContent], str]:
+    """(çıktı, durum) döner; durum: "ok" | "error" | "preview" (onay bekliyor)."""
+    servers = load_servers()
 
     if name == "list_servers":
-        return text_result({n: public_server(cfg) for n, cfg in servers.items()})
+        return text_result({n: public_server(cfg) for n, cfg in servers.items()}), "ok"
 
     if name == "fleet_health":
-        return text_result(await fleet_health(servers))
+        return text_result(await fleet_health(servers)), "ok"
 
     spec = fleet_tools.TOOLS_BY_NAME.get(name)
     if spec is None and name != "run_remote_command":
@@ -514,37 +564,42 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
 
     server_name = arguments.get("server_name")
     if server_name not in servers:
-        return text_result(f"Hata: '{server_name}' sunucusu hafızada bulunamadı.")
+        return text_result(f"Hata: '{server_name}' sunucusu hafızada bulunamadı."), "error"
     cfg = servers[server_name]
 
     try:
         if name == "run_remote_command":
             command = arguments.get("command")
             if not arguments.get("confirm"):
-                return confirmation_required(server_name, command)
+                return confirmation_required(server_name, command), "preview"
             async with open_runner(cfg) as (run, info):
                 result = await run(command, privileged=bool(arguments.get("as_root")))
             output = f"User: {result.user}\nVia: {result.via}\nExit Status: {result.exit_status}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}"
             if info.get("cockpit_error"):
                 output = f"Not: Cockpit kullanılamadı, SSH ile çalıştırıldı ({info['cockpit_error']})\n" + output
-            return text_result(output)
+            return text_result(output), "ok"
 
         if not spec.read_only and not arguments.get("confirm"):
-            return confirmation_required(server_name, spec.preview(arguments))
+            return confirmation_required(server_name, spec.preview(arguments)), "preview"
 
         async with open_runner(cfg) as (run, info):
             value = await spec.handler(run, arguments)
         if isinstance(value, dict):
             value["connection"] = info
-        return text_result(value)
+        return text_result(value), "ok"
     except (SSHError, cockpit_client.CockpitError) as e:
-        return text_result(str(e))
+        return text_result(str(e)), "error"
     except fleet_tools.ToolInputError as e:
         raise ValueError(str(e)) from e
 
 # FastAPI Web Uç Noktaları
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9.:_-]{1,253}$")
+
+def audit_web(request: Request, action: str, status: str = "ok", **fields: Any) -> None:
+    """Panelde yapılan bir işlemi kaydeder (kullanıcı oturumdan alınır; fields ile ezilebilir)."""
+    fields.setdefault("user", (request.session.get("user") or {}).get("username"))
+    audit_log.record("web", action, status, **request_actor(request), **fields)
 
 def current_user(request: Request) -> str | None:
     """Cockpit ile giriş yapmış ve hâlâ yetkili olan kullanıcının adı."""
@@ -565,6 +620,9 @@ PAGE_STYLE = """
   td form { display: inline; }
   form.login { display: grid; grid-template-columns: 140px 220px; gap: 8px; }
   textarea.key { width: 100%; font-family: monospace; font-size: 12px; }
+  form.filter { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  table.logs td { vertical-align: top; }
+  table.logs pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0; font-size: 12px; max-height: 320px; overflow: auto; }
 </style>
 """
 
@@ -780,7 +838,7 @@ async def index(request: Request, error: str = "", info: str = ""):
 
     return render_page("Sunucular", f"""
         <h2>Hoş geldiniz, {html.escape(username)}!</h2>
-        <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code></p>
+        <p>MCP Gateway aktif. SSE Uç Noktası: <code>{html.escape(PUBLIC_URL)}/sse</code> · <a href="/logs">İşlem kayıtları</a></p>
         {public_ip_html(await public_ips(), await public_ips(proxy=OUTBOUND_PROXY) if OUTBOUND_PROXY else None)}
         <h3>Kayıtlı Sunucular</h3>
         {info_html}
@@ -915,9 +973,12 @@ async def save_server(request: Request):
         # Bilgiler test edilmedi: eski (başka ayarlara ait olabilecek) durum gösterilmesin
         servers[name] = cfg
         save_servers(servers)
+        audit_web(request, "server_save", server=name, args=public_server(cfg), result="Bağlantı testi yapılmadan kaydedildi.")
         return _redirect_info(f"'{name}' bağlantı testi yapılmadan kaydedildi.")
 
     check = await check_server(cfg)
+    audit_web(request, "server_save", "ok" if check["ok"] else "error", server=name, args=public_server(cfg),
+              via=check.get("via"), result=check["message"])
     if not check["ok"]:
         return _redirect_error(f"'{name}' kaydedilmedi, bağlantı kurulamadı: {check['message']}")
     cfg["last_check"] = check
@@ -937,6 +998,7 @@ async def refresh_public_ip(request: Request):
     if OUTBOUND_PROXY:
         await public_ips(force=True, proxy=OUTBOUND_PROXY)
     found = ", ".join(ip for ip in ips.values() if ip)
+    audit_web(request, "public_ip_refresh", "ok" if found else "error", result=found)
     if found:
         return _redirect_info(f"Dış IP adresi: {found}")
     return _redirect_error("Dış IP adresi belirlenemedi.")
@@ -949,6 +1011,8 @@ async def test_server(name: str, request: Request):
     if cfg is None:
         return _redirect_error(f"'{name}' bulunamadı.")
     check = await check_server(cfg)
+    audit_web(request, "server_test", "ok" if check["ok"] else "error", server=name,
+              via=check.get("via"), result=check["message"])
     servers = load_servers()
     if name in servers:
         servers[name]["last_check"] = check
@@ -962,8 +1026,10 @@ async def delete_server(name: str, request: Request):
     if not current_user(request):
         return forbidden()
     servers = load_servers()
-    servers.pop(name, None)
+    removed = servers.pop(name, None)
     save_servers(servers)
+    audit_web(request, "server_delete", "ok" if removed else "error", server=name,
+              result=None if removed else "Sunucu bulunamadı.")
     return RedirectResponse(url="/", status_code=303)
 
 def shared_key_row(entry: Dict[str, Any]) -> str:
@@ -995,9 +1061,11 @@ async def add_shared_key(request: Request):
     try:
         entry = import_shared_key(name, form.get("private_key") or "", form.get("passphrase") or "")
     except ValueError as e:
+        audit_web(request, "ssh_key_add", "error", args={"name": name}, result=str(e))
         return _redirect_error(f"Anahtar eklenmedi: {e}")
     keys[name] = entry
     save_shared_keys(keys)
+    audit_web(request, "ssh_key_add", args={"name": name, "fingerprint": entry["fingerprint"]})
     return _redirect_info(f"'{name}' anahtarı eklendi ({entry['fingerprint']}).")
 
 @app.post("/ssh-keys/generate")
@@ -1014,6 +1082,7 @@ async def generate_shared_key(request: Request):
     key = asyncssh.generate_private_key("ssh-ed25519", comment=f"rhel-mcp-gateway:{name}")
     keys[name] = shared_key_entry(name, key)
     save_shared_keys(keys)
+    audit_web(request, "ssh_key_generate", args={"name": name, "fingerprint": keys[name]["fingerprint"]})
     return _redirect_info(f"'{name}' anahtarı üretildi. Açık anahtarı sunuculardaki authorized_keys dosyasına ekleyin.")
 
 @app.post("/ssh-keys/{name}/delete")
@@ -1021,9 +1090,87 @@ async def delete_shared_key(name: str, request: Request):
     if not current_user(request):
         return forbidden()
     keys = load_shared_keys()
-    keys.pop(name, None)
+    removed = keys.pop(name, None)
     save_shared_keys(keys)
+    audit_web(request, "ssh_key_delete", "ok" if removed else "error",
+              args={"name": name, "fingerprint": (removed or {}).get("fingerprint")})
     return _redirect_info(f"'{name}' anahtarı silindi.")
+
+# --- İşlem kayıtları ---
+LOGS_PER_PAGE = 100
+LOG_STATUS = {"ok": ("✓", "ok"), "error": ("✗ hata", "err"), "preview": ("onay bekliyor", "warn")}
+
+def log_row(entry: Dict[str, Any]) -> str:
+    e = lambda v: html.escape(str(v)) if v not in (None, "") else "—"
+    mark, css = LOG_STATUS.get(entry.get("status"), (entry.get("status"), "note"))
+    details = []
+    if entry.get("args"):
+        details.append("<b>Parametreler</b><pre>" + html.escape(json.dumps(entry["args"], ensure_ascii=False, indent=2)) + "</pre>")
+    if entry.get("commands"):
+        lines = "\n".join(
+            f"[{c.get('via')} · {c.get('user')}{' · root' if c.get('as_root') else ''} · çıkış {c.get('exit_status')}] {c.get('command')}"
+            for c in entry["commands"]
+        )
+        details.append("<b>Çalıştırılan komutlar</b><pre>" + html.escape(lines) + "</pre>")
+    if entry.get("result"):
+        details.append("<b>Sonuç</b><pre>" + html.escape(str(entry["result"])) + "</pre>")
+    if entry.get("commands"):
+        summary = f"{len(entry['commands'])} komut"
+    else:
+        summary = e(entry["via"]) if entry.get("via") else "Ayrıntı"
+    if entry.get("duration_ms") is not None:
+        summary += f" · {entry['duration_ms']} ms"
+    detail_html = f"<details><summary>{summary}</summary>{''.join(details)}</details>" if details else "—"
+    return (
+        f"<tr><td>{e(entry.get('at'))}</td>"
+        f"<td>{e(entry.get('user'))}<br><span class='note'>{e(entry.get('ip'))}</span></td>"
+        f"<td>{e(entry.get('source'))}</td><td><b>{e(entry.get('action'))}</b></td>"
+        f"<td>{e(entry.get('server'))}</td><td><span class='{css}'>{e(mark)}</span></td><td>{detail_html}</td></tr>"
+    )
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs_page(request: Request, q: str = "", source: str = "", status: str = "", user: str = "",
+                    server: str = "", page: int = 1):
+    if not current_user(request):
+        return forbidden()
+    page = max(page, 1)
+    entries, has_more = audit_log.read(LOGS_PER_PAGE, (page - 1) * LOGS_PER_PAGE, q=q, source=source,
+                                       status=status, user=user.strip(), server=server.strip())
+    rows = "".join(log_row(entry) for entry in entries) or "<tr><td colspan='7'>Kayıt yok.</td></tr>"
+    filters = {"q": q, "source": source, "status": status, "user": user, "server": server}
+
+    def options(selected: str, choices: Dict[str, str]) -> str:
+        return "".join(f"<option value='{v}'{' selected' if v == selected else ''}>{html.escape(label)}</option>"
+                       for v, label in choices.items())
+
+    def page_link(number: int, label: str) -> str:
+        query = urlencode({**{k: v for k, v in filters.items() if v}, "page": number})
+        return f"<a href='/logs?{query}'>{label}</a>"
+
+    nav = " · ".join(filter(None, [
+        page_link(page - 1, "← Daha yeni") if page > 1 else "",
+        f"Sayfa {page}",
+        page_link(page + 1, "Daha eski →") if has_more else "",
+    ]))
+    return render_page("İşlem kayıtları", f"""
+        <h2>İşlem kayıtları</h2>
+        <p><a href="/">← Sunucular</a></p>
+        <p class="note">MCP araç çağrıları, panel işlemleri ve girişler. En yeni kayıt üsttedir.
+        Kayıtlar <code>{html.escape(audit_log.LOG_FILE)}</code> dosyasında tutulur; şifreler ve anahtarlar kaydedilmez.</p>
+        <form class="filter" method="get" action="/logs">
+          <input name="q" value="{html.escape(q)}" placeholder="Ara (komut, araç, çıktı…)">
+          <input name="user" value="{html.escape(user)}" placeholder="Kullanıcı" size="12">
+          <input name="server" value="{html.escape(server)}" placeholder="Sunucu" size="12">
+          <select name="source">{options(source, {"": "Tüm kaynaklar", "mcp": "MCP", "web": "Panel"})}</select>
+          <select name="status">{options(status, {"": "Tüm durumlar", "ok": "Başarılı", "error": "Hata", "preview": "Onay bekliyor"})}</select>
+          <button type="submit">Filtrele</button> <a href="/logs">Temizle</a>
+        </form>
+        <table class="logs">
+          <tr><th>Zaman</th><th>Kullanıcı</th><th>Kaynak</th><th>İşlem</th><th>Sunucu</th><th>Durum</th><th>Ayrıntı</th></tr>
+          {rows}
+        </table>
+        <p>{nav}</p>
+    """)
 
 def login_page(action: str, title: str, error: str = "", note: str = "", hidden: Dict[str, str] | None = None,
                status_code: int = 200, ask_token: bool = False) -> HTMLResponse:
@@ -1063,8 +1210,10 @@ async def login_submit(request: Request):
     # Token Cockpit'ten önce kontrol edilir: token'sız denemeler şifreyi hiç sınayamaz
     error = TOKEN_ERROR if not login_token_ok(form.get("token")) else await authenticator.login(username, form.get("password") or "")
     if error:
+        audit_web(request, "login", "error", user=username, result=error)
         return login_page("/login", "RHEL MCP Gateway - Giriş", error=error, status_code=401, ask_token=bool(MCP_API_KEY))
     request.session['user'] = {"username": username}
+    audit_web(request, "login")
     return RedirectResponse(url='/', status_code=303)
 
 # --- MCP istemcileri için OAuth girişi (/authorize buraya yönlendirir) ---
@@ -1093,16 +1242,20 @@ async def oauth_login_submit(request: Request):
     token_ok = login_token_ok(url_token) or login_token_ok(form.get("token"))
     error = TOKEN_ERROR if not token_ok else await authenticator.login(username, form.get("password") or "")
     if error:
+        audit_web(request, "oauth_login", "error", user=username, args={"client": client_name}, result=error)
         return login_page(
             "/oauth/login", "MCP İstemcisine Erişim İzni", error=error,
             note=f"<b>{html.escape(client_name)}</b> bu gateway'deki araçlara erişmek istiyor. ",
             hidden={"request": request_id}, status_code=401, ask_token=not login_token_ok(url_token),
         )
     redirect = oauth_provider.complete_authorization(request_id, username)
+    audit_web(request, "oauth_login", user=username, args={"client": client_name})
     return RedirectResponse(url=redirect, status_code=302)
 
 @app.get("/logout")
 async def logout(request: Request):
+    if request.session.get("user"):
+        audit_web(request, "logout")
     request.session.clear()
     return RedirectResponse(url='/', status_code=303)
 
@@ -1137,7 +1290,11 @@ async def authenticate_mcp(request: Request) -> str | None:
 
 async def handle_sse(request: Request):
     # /messages/ istekleri tahmin edilemez session_id ile korunur; kimlik doğrulama /sse'de yapılır.
-    if await authenticate_mcp(request) is None:
+    username = await authenticate_mcp(request)
+    if username is None:
+        if request.headers.get("authorization"):
+            # Kimlik bilgisi gönderilmiş ama reddedilmiş (başlıksız ilk keşif isteği kaydedilmez)
+            audit_log.record("mcp", "connect", "error", **request_actor(request), result="Kimlik doğrulama reddedildi.")
         # URL'deki geçerli token metadata adresine taşınır; istemci bunu OAuth isteğindeki
         # "resource" alanında geri gönderir ve giriş sayfası token'ı ayrıca sormaz.
         metadata_url = RESOURCE_METADATA_URL
@@ -1150,6 +1307,10 @@ async def handle_sse(request: Request):
             headers={"WWW-Authenticate": f'Bearer error="invalid_token", resource_metadata="{metadata_url}"'},
         )
 
+    actor = {"user": username, **request_actor(request)}
+    audit_log.record("mcp", "connect", **actor, args={"user_agent": request.headers.get("user-agent")})
+    # Araç çağrıları bu görevin bağlamını devralır; kayıtlarda kullanıcı ve IP görünür
+    _mcp_actor.set(actor)
     async with sse.connect_sse(
         request.scope, request.receive, request._send
     ) as streams:

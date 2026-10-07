@@ -99,6 +99,26 @@ async def test_sse_roundtrip(live_server, access_token):
     assert 202 in live_server.status_codes()
 
 
+async def test_tool_calls_are_logged_with_connected_user(live_server, access_token, audit_file):
+    async with sse_client(f"{live_server.url}/sse", headers={"Authorization": f"Bearer {access_token}"}) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            await session.call_tool("list_servers", {})
+
+    entries = audit_file(source="mcp")
+    assert [(e["action"], e["status"], e["user"], e["ip"]) for e in entries] == [
+        ("list_servers", "ok", "admin", "127.0.0.1"), ("connect", "ok", "admin", "127.0.0.1")]
+
+
+async def test_rejected_credentials_are_logged(live_server, audit_file):
+    import httpx
+
+    async with httpx.AsyncClient(trust_env=False) as client:
+        await client.get(f"{live_server.url}/sse")  # başlıksız keşif isteği kaydedilmez
+        await client.get(f"{live_server.url}/sse", headers={"Authorization": "Bearer yanlis"})
+    assert [(e["action"], e["status"]) for e in audit_file()] == [("connect", "error")]
+
+
 async def test_access_token_alone_is_not_enough(live_server):
     # Erişim token'ı (MCP_API_KEY) tek başına giriş sağlamaz; Cockpit girişi de gerekir
     import httpx

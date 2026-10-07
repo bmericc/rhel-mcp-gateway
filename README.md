@@ -47,6 +47,7 @@ sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address
 | `MCP_API_KEY` | Cockpit girişine ek olarak istenen **erişim token'ı** (ikinci faktör). Uzun ve rastgele olmalı. Boşsa yalnızca Cockpit girişi yeter. Değiştirilirse tüm oturumlar kapanır. |
 | `OUTBOUND_PROXY` | Opsiyonel. Sunuculara giden bağlantılar için varsayılan proxy (`socks5://`, `socks5h://`, `http://`). Bkz. *Bağlantı proxy'si*. |
 | `SSH_LOGINS` | SSH bağlantılarında (tünel ve yedek) denenecek kullanıcılar ve key klasörleri. Varsayılan: `root:/root/.ssh,bmericc:/home/bmericc/.ssh` |
+| `AUDIT_LOG_MAX_MB` | İşlem kayıt dosyasının en fazla boyutu (varsayılan `10`). Bkz. *İşlem kayıtları*. |
 
 `docker-compose.yml`, host makineye `host.docker.internal` adıyla erişim sağlar. Ayrıca `/root/.ssh` ve `/home/bmericc/.ssh` klasörlerini salt okunur bağlar.
 
@@ -160,6 +161,18 @@ Her araç çıktısında hangi yolla bağlanıldığı yazar: `"connection": {"v
 Paket ve güvenlik duvarı araçları RHEL ailesi içindir (`dnf`, `firewalld`). Debian/Ubuntu sunucularda bunlar yerine `run_remote_command` kullanılabilir.
 
 Girdiler (servis, paket, port vb.) doğrulanır. Komutlar argv olarak verildiği için komut enjeksiyonuna kapalıdır. Çıktılar JSON döner, uzun çıktılar kırpılır, komutlar zaman aşımına uğrar.
+
+## İşlem kayıtları
+
+Gateway üzerinden yapılan her işlem kaydedilir ve panelde *İşlem kayıtları* sayfasında (`/logs`) gösterilir:
+
+- **MCP araç çağrıları:** kim (kullanıcı, IP), hangi araç, hangi sunucu, parametreler, sunucuda çalıştırılan komutlar (bağlantı yolu, kullanıcı, çıkış kodu), sonuç ve süre. `confirm: true` verilmediği için çalıştırılmayan çağrılar *onay bekliyor* olarak görünür.
+- **MCP bağlantıları:** başarılı bağlantılar ve reddedilen kimlik bilgileri.
+- **Panel işlemleri:** giriş (başarılı/başarısız), çıkış, sunucu ekleme/güncelleme/test/silme, ortak SSH anahtarı ekleme/üretme/silme.
+
+Sayfada metin araması ile kullanıcı, sunucu, kaynak (MCP / panel) ve durum filtreleri vardır; en yeni kayıt üsttedir.
+
+Kayıtlar `data/audit.log` dosyasında, her satırı bir JSON nesnesi olacak şekilde tutulur (dosya izni `600`). Dosya `AUDIT_LOG_MAX_MB` boyutuna ulaşınca `data/audit.log.1` olarak yedeklenir ve yenisi başlatılır; yalnızca bir yedek tutulur. Şifreler, erişim token'ları ve özel anahtarlar kaydedilmez. **Çalıştırılan komutlar ve çıktıları (alan başına 4000 karaktere kırpılarak) kaydedilir**; komuta ya da çıktıya yazılan gizli bilgiler kayıtta da yer alır.
 
 ## Geliştirme ve testler
 
