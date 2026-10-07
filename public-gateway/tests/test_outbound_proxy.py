@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 import cockpit_client
 import main
 import outbound_proxy
-from creds import PASSWORD
+from creds import PASSWORD, WRONG_PASSWORD
 
 pytestmark = pytest.mark.anyio
 
@@ -71,7 +71,7 @@ async def roundtrip(sock):
 
 @pytest.mark.parametrize("url,expected", [
     ("socks5://10.0.0.1:1080", {"scheme": "socks5", "host": "10.0.0.1", "port": 1080, "username": None, "password": None}),
-    ("http://u:p%40ss@proxy.local:3128", {"scheme": "http", "host": "proxy.local", "port": 3128, "username": "u", "password": "p@ss"}),
+    ("http://u:x%40x@proxy.local:3128", {"scheme": "http", "host": "proxy.local", "port": 3128, "username": "u", "password": "x@x"}),
 ])
 def test_parse_proxy(url, expected):
     assert outbound_proxy.parse_proxy(url) == expected
@@ -84,7 +84,7 @@ def test_parse_proxy_rejects(url):
 
 
 def test_redact_hides_password():
-    assert outbound_proxy.redact("socks5://ali:gizli@h:1080") == "socks5://ali:***@h:1080"
+    assert outbound_proxy.redact(f"socks5://ali:{PASSWORD}@h:1080") == "socks5://ali:***@h:1080"
     assert outbound_proxy.redact("http://h:3128") == "http://h:3128"
 
 
@@ -123,7 +123,7 @@ async def test_proxy_authentication(kind):
         sock = await outbound_proxy.open_tunnel(p.url(auth=("ali", PASSWORD)), "127.0.0.1", port, timeout=5)
         assert await roundtrip(sock) == b"echo:merhaba"
         with pytest.raises(outbound_proxy.ProxyError):
-            await outbound_proxy.open_tunnel(p.url(auth=("ali", "yanlis-xxx")), "127.0.0.1", port, timeout=5)
+            await outbound_proxy.open_tunnel(p.url(auth=("ali", WRONG_PASSWORD)), "127.0.0.1", port, timeout=5)
         with pytest.raises(outbound_proxy.ProxyError):
             await outbound_proxy.open_tunnel(p.url(), "127.0.0.1", port, timeout=5)
     finally:
@@ -185,7 +185,7 @@ async def test_cockpit_session_through_proxy(cockpit, kind):
 
 async def test_cockpit_wrong_password_through_proxy(cockpit, socks_proxy):
     with pytest.raises(cockpit_client.CockpitAuthError):
-        await cockpit_client.check_login(cockpit.url, "admin", "yanlis-xxx", proxy=socks_proxy.url())
+        await cockpit_client.check_login(cockpit.url, "admin", WRONG_PASSWORD, proxy=socks_proxy.url())
 
 
 async def test_cockpit_proxy_down(cockpit):
