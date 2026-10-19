@@ -426,9 +426,24 @@ async def available_updates(run: Runner, args: dict) -> dict:
 
 async def package_info(run: Runner, args: dict) -> dict:
     name = validate_package(args.get("name"))
+    if await detect_package_manager(run) == "apt":
+        # Çıktı örneği: "install ok installed 3.0.13-0ubuntu3.4"; kaldırılmış ama
+        # yapılandırması kalmış paketler "deinstall ok config-files ..." döner
+        status = await run(["dpkg-query", "-W", "--showformat=${Status} ${Version}", name])
+        fields = status.stdout.split()
+        is_installed = status.exit_status == 0 and fields[2:3] == ["installed"]
+        info = await run(["apt-cache", "show", name], timeout=LONG_TIMEOUT)
+        return {
+            "package_manager": "apt",
+            "name": name,
+            "installed": is_installed,
+            "installed_version": fields[3] if is_installed and len(fields) > 3 else None,
+            "info": truncate(info.stdout or info.stderr),
+        }
     installed = await run(["rpm", "-q", name])
     info = await run(["dnf", "-q", "info", name], timeout=LONG_TIMEOUT)
     return {
+        "package_manager": "dnf",
         "name": name,
         "installed": installed.exit_status == 0,
         "installed_version": installed.stdout.strip() if installed.exit_status == 0 else None,
@@ -476,14 +491,20 @@ async def install_updates(run: Runner, args: dict) -> dict:
     return out
 
 
+async def _package_change(run: Runner, action: str, names: list[str]) -> dict:
+    manager = await detect_package_manager(run)
+    prefix = _APT_GET if manager == "apt" else ["dnf", "-y"]
+    out = result_dict(await run([*prefix, action, *names], privileged=True, timeout=LONG_TIMEOUT))
+    out["package_manager"] = manager
+    return out
+
+
 async def package_install(run: Runner, args: dict) -> dict:
-    names = validate_packages(args.get("names"))
-    return result_dict(await run(["dnf", "-y", "install", *names], privileged=True, timeout=LONG_TIMEOUT))
+    return await _package_change(run, "install", validate_packages(args.get("names")))
 
 
 async def package_remove(run: Runner, args: dict) -> dict:
-    names = validate_packages(args.get("names"))
-    return result_dict(await run(["dnf", "-y", "remove", *names], privileged=True, timeout=LONG_TIMEOUT))
+    return await _package_change(run, "remove", validate_packages(args.get("names")))
 
 
 def _firewall_target(args: dict) -> str:
@@ -586,7 +607,7 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "package_info",
-        "Returns whether a package is installed, its version and its dnf info.",
+        "Returns whether a package is installed, its version and its package info (dnf on RHEL family, apt on Debian/Ubuntu).",
         {"name": {"type": "string", "description": "Package name"}},
         package_info, required=["name"],
     ),
@@ -612,17 +633,17 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "package_install",
-        "Installs packages with dnf.",
+        "Installs packages (dnf on RHEL family, apt on Debian/Ubuntu).",
         {"names": {"type": "array", "items": {"type": "string"}, "description": "Package names"}},
         package_install, required=["names"], read_only=False,
-        preview=lambda a: f"dnf -y install {_names(a)}",
+        preview=lambda a: f"dnf -y install {_names(a)} | apt-get -y install {_names(a)}",
     ),
     ToolSpec(
         "package_remove",
-        "Removes packages with dnf.",
+        "Removes packages (dnf on RHEL family, apt on Debian/Ubuntu).",
         {"names": {"type": "array", "items": {"type": "string"}, "description": "Package names"}},
         package_remove, required=["names"], read_only=False,
-        preview=lambda a: f"dnf -y remove {_names(a)}",
+        preview=lambda a: f"dnf -y remove {_names(a)} | apt-get -y remove {_names(a)}",
     ),
     ToolSpec(
         "firewall_rule",

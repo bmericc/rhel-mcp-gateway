@@ -135,7 +135,7 @@ The gateway works with the privileges of the Cockpit account defined for each se
 
 Change tools are not executed without the `confirm: true` parameter; in that case only a preview of the operation is returned.
 
-> `available_updates` and `install_updates` support both `dnf` (RHEL family) and `apt` (Debian/Ubuntu), chosen from `/etc/os-release`. The other package and firewall tools are designed for the RHEL family (`dnf`, `firewalld`); on other distributions these operations can be done with `run_remote_command`.
+> The package tools (`available_updates`, `install_updates`, `package_info`, `package_install`, `package_remove`) support both `dnf` (RHEL family) and `apt` (Debian/Ubuntu), chosen from `/etc/os-release`. The firewall tools are designed for the RHEL family (`firewalld`); on other distributions these operations can be done with `run_remote_command`.
 
 ## 6. Security
 
@@ -201,7 +201,7 @@ For the full list of configuration variables see the [README](../README.md#envir
 
 ## 9. Roadmap
 
-- Package (`apt`) and firewall (`ufw`) tools for the Debian/Ubuntu family.
+- Firewall (`ufw`) tools for the Debian/Ubuntu family.
 - SSH host key verification and hardened TLS settings.
 
 ## 10. License

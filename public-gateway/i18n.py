@@ -226,8 +226,8 @@ TR = {
     "Lists pending package updates (dnf on RHEL family, apt on Debian/Ubuntu).":
         "Bekleyen paket güncellemelerini listeler (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
     "Security updates only": "Sadece güvenlik güncellemeleri",
-    "Returns whether a package is installed, its version and its dnf info.":
-        "Bir paketin kurulu olup olmadığını, sürümünü ve dnf bilgisini döndürür.",
+    "Returns whether a package is installed, its version and its package info (dnf on RHEL family, apt on Debian/Ubuntu).":
+        "Bir paketin kurulu olup olmadığını, sürümünü ve paket bilgisini döndürür (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
     "Package name": "Paket adı",
     "Starts, stops, restarts, reloads, enables or disables a systemd service.":
         "Bir systemd servisini başlatır, durdurur, yeniden başlatır, yeniden yükler, etkinleştirir veya devre dışı bırakır.",
@@ -235,9 +235,11 @@ TR = {
     "Installs package updates (dnf on RHEL family, apt on Debian/Ubuntu).":
         "Paket güncellemelerini kurar (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
     "No pending security updates.": "Bekleyen güvenlik güncellemesi yok.",
-    "Installs packages with dnf.": "dnf ile paket kurar.",
+    "Installs packages (dnf on RHEL family, apt on Debian/Ubuntu).":
+        "Paket kurar (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
     "Package names": "Paket adları",
-    "Removes packages with dnf.": "dnf ile paket kaldırır.",
+    "Removes packages (dnf on RHEL family, apt on Debian/Ubuntu).":
+        "Paket kaldırır (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
     "Adds/removes a permanent firewalld port or service rule and reloads.":
         "firewalld'ye kalıcı port veya servis kuralı ekler/kaldırır ve yeniden yükler.",
     "Port/protocol (e.g. 8080/tcp, 3000-3010/udp)": "Port/protokol (örn. 8080/tcp, 3000-3010/udp)",

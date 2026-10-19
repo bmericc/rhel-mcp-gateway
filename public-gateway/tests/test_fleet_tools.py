@@ -378,8 +378,84 @@ async def test_service_action_with_confirm(ssh):
 
 @pytestmark_anyio
 async def test_package_install_with_confirm(ssh):
-    await call("package_install", {"server_name": "root-box", "names": ["htop", "tmux"], "confirm": True})
-    assert ssh["commands"] == ["env LC_ALL=C dnf -y install htop tmux"]
+    data = payload(await call("package_install", {"server_name": "root-box", "names": ["htop", "tmux"], "confirm": True}))
+    assert ssh["commands"][-1] == "env LC_ALL=C dnf -y install htop tmux"
+    assert data["package_manager"] == "dnf"
+
+
+@pytestmark_anyio
+async def test_package_install_apt(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE))]
+    data = payload(await call("package_install", {"server_name": "user-box", "names": ["htop"], "confirm": True}))
+    assert data["package_manager"] == "apt"
+    assert ssh["commands"][-1] == (
+        "sudo -n env LC_ALL=C env DEBIAN_FRONTEND=noninteractive apt-get -y "
+        "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install htop"
+    )
+
+
+@pytestmark_anyio
+async def test_package_remove_apt(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE))]
+    data = payload(await call("package_remove", {"server_name": "root-box", "names": ["htop", "tmux"], "confirm": True}))
+    assert data["package_manager"] == "apt"
+    assert ssh["commands"][-1].endswith("apt-get -y -o Dpkg::Options::=--force-confdef "
+                                        "-o Dpkg::Options::=--force-confold remove htop tmux")
+    assert not any("dnf" in c for c in ssh["commands"])
+
+
+@pytestmark_anyio
+async def test_package_remove_dnf(ssh):
+    await call("package_remove", {"server_name": "root-box", "names": ["htop"], "confirm": True})
+    assert ssh["commands"][-1] == "env LC_ALL=C dnf -y remove htop"
+
+
+@pytestmark_anyio
+async def test_package_info_dnf(ssh):
+    ssh["script"] = [("rpm -q", Result(0, "openssl-3.0.7-27.el9.x86_64\n")), ("dnf -q info", Result(0, "Name : openssl\n"))]
+    data = payload(await call("package_info", {"server_name": "root-box", "name": "openssl"}))
+    assert data["package_manager"] == "dnf"
+    assert data["installed"] is True
+    assert data["installed_version"] == "openssl-3.0.7-27.el9.x86_64"
+
+
+@pytestmark_anyio
+async def test_package_info_apt(ssh):
+    ssh["script"] = [
+        ("os-release", Result(0, UBUNTU_OS_RELEASE)),
+        ("dpkg-query", Result(0, "install ok installed 3.0.13-0ubuntu3.4")),
+        ("apt-cache show", Result(0, "Package: openssl\nVersion: 3.0.13-0ubuntu3.4\n")),
+    ]
+    data = payload(await call("package_info", {"server_name": "root-box", "name": "openssl"}))
+    assert data["package_manager"] == "apt"
+    assert data["installed"] is True
+    assert data["installed_version"] == "3.0.13-0ubuntu3.4"
+    assert "Package: openssl" in data["info"]
+    assert "env LC_ALL=C dpkg-query -W '--showformat=${Status} ${Version}' openssl" in ssh["commands"]
+    assert not any("rpm" in c or "dnf" in c for c in ssh["commands"])
+
+
+@pytestmark_anyio
+async def test_package_info_apt_config_files_only(ssh):
+    ssh["script"] = [
+        ("os-release", Result(0, UBUNTU_OS_RELEASE)),
+        ("dpkg-query", Result(0, "deinstall ok config-files 3.0.13-0ubuntu3.4")),
+    ]
+    data = payload(await call("package_info", {"server_name": "root-box", "name": "openssl"}))
+    assert data["installed"] is False
+    assert data["installed_version"] is None
+
+
+@pytestmark_anyio
+async def test_package_info_apt_unknown_package(ssh):
+    ssh["script"] = [
+        ("os-release", Result(0, UBUNTU_OS_RELEASE)),
+        ("dpkg-query", Result(1, "", "dpkg-query: no packages found matching nosuch")),
+        ("apt-cache show", Result(100, "", "E: No packages found")),
+    ]
+    data = payload(await call("package_info", {"server_name": "root-box", "name": "nosuch"}))
+    assert data["installed"] is False
+    assert "No packages found" in data["info"]
 
 
 @pytestmark_anyio
