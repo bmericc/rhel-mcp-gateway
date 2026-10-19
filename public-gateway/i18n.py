@@ -185,6 +185,7 @@ TR = {
     "time expression": "zaman ifadesi",
     "firewalld service name": "firewalld servis adı",
     "At least one package name is required.": "En az bir paket adı verilmeli.",
+    "Package name cannot end with '{suffix}': {value}": "Paket adı '{suffix}' ile bitemez: {value}",
     "Invalid port: {value}": "Geçersiz port: {value}",
     "Expected a number: {value}": "Sayı bekleniyordu: {value}",
     "... [output truncated, {total} characters total]": "... [çıktı kırpıldı, toplam {total} karakter]",

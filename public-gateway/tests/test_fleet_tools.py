@@ -405,6 +405,35 @@ async def test_package_remove_apt(ssh):
 
 
 @pytestmark_anyio
+async def test_package_install_apt_rejects_remove_suffix(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE))]
+    result = await call("package_install", {"server_name": "root-box", "names": ["htop", "bash-"], "confirm": True})
+    assert result.isError
+    assert not any("apt-get" in c for c in ssh["commands"])
+
+
+@pytestmark_anyio
+async def test_package_remove_apt_rejects_install_suffix(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("dpkg-query", Result(1, "", "no packages found"))]
+    result = await call("package_remove", {"server_name": "root-box", "names": ["bash+"], "confirm": True})
+    assert result.isError
+    assert not any("apt-get" in c for c in ssh["commands"])
+
+
+@pytestmark_anyio
+async def test_package_remove_apt_allows_installed_plus_name(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("dpkg-query", Result(0, "install ok installed"))]
+    await call("package_remove", {"server_name": "root-box", "names": ["g++"], "confirm": True})
+    assert ssh["commands"][-1].endswith("remove g++")
+
+
+@pytestmark_anyio
+async def test_package_install_dnf_keeps_suffix(ssh):
+    await call("package_install", {"server_name": "root-box", "names": ["foo-"], "confirm": True})
+    assert ssh["commands"][-1] == "env LC_ALL=C dnf -y install foo-"
+
+
+@pytestmark_anyio
 async def test_package_remove_dnf(ssh):
     await call("package_remove", {"server_name": "root-box", "names": ["htop"], "confirm": True})
     assert ssh["commands"][-1] == "env LC_ALL=C dnf -y remove htop"

@@ -491,8 +491,24 @@ async def install_updates(run: Runner, args: dict) -> dict:
     return out
 
 
+async def _dpkg_installed(run: Runner, name: str) -> bool:
+    r = await run(["dpkg-query", "-W", "--showformat=${Status}", name])
+    return r.exit_status == 0 and r.stdout.split()[2:3] == ["installed"]
+
+
+# apt-get, bulamadığı paket adının sonundaki "+" işaretini "kur", "-" işaretini
+# "kaldır" olarak yorumlar; onaylanan işlemin tersine dönmemesi için bunlar reddedilir
+_APT_OPPOSITE_SUFFIX = {"install": "-", "remove": "+"}
+
+
 async def _package_change(run: Runner, action: str, names: list[str]) -> dict:
     manager = await detect_package_manager(run)
+    if manager == "apt":
+        suffix = _APT_OPPOSITE_SUFFIX[action]
+        for name in names:
+            # "g++" gibi gerçek, kurulu paketler kaldırılabilsin diye tam adla kontrol edilir
+            if name.endswith(suffix) and not (action == "remove" and await _dpkg_installed(run, name)):
+                raise ToolInputError(t("Package name cannot end with '{suffix}': {value}", suffix=suffix, value=repr(name)))
     prefix = _APT_GET if manager == "apt" else ["dnf", "-y"]
     out = result_dict(await run([*prefix, action, *names], privileged=True, timeout=LONG_TIMEOUT))
     out["package_manager"] = manager
