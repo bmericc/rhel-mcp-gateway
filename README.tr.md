@@ -156,12 +156,12 @@ Her araç çıktısında hangi yolla bağlanıldığı yazar: `"connection": {"v
 | --- | --- |
 | `service_action` | start / stop / restart / reload / enable / disable |
 | `install_updates` | `dnf upgrade` / `apt-get upgrade` (opsiyonel yalnızca güvenlik) |
-| `package_install` / `package_remove` | dnf ile paket kur / kaldır |
+| `package_install` / `package_remove` | Paket kur / kaldır (`dnf` / `apt-get`) |
 | `firewall_rule` | Kalıcı port/servis kuralı ekle/kaldır |
 | `reboot_server` | Yeniden başlat |
 | `run_remote_command` | Serbest komut (`as_root` ile yönetici yetkisi) |
 
-`available_updates` ve `install_updates` dağıtımı `/etc/os-release` üzerinden tespit eder; RHEL ailesinde `dnf`, Debian/Ubuntu'da `apt` kullanır. Diğer paket ve güvenlik duvarı araçları RHEL ailesi içindir (`dnf`, `firewalld`); Debian/Ubuntu sunucularda bunlar yerine `run_remote_command` kullanılabilir.
+Paket araçları (`available_updates`, `install_updates`, `package_info`, `package_install`, `package_remove`) dağıtımı `/etc/os-release` üzerinden tespit eder; RHEL ailesinde `dnf`, Debian/Ubuntu'da `apt` kullanır. Güvenlik duvarı araçları RHEL ailesi içindir (`firewalld`); Debian/Ubuntu sunucularda bunlar yerine `run_remote_command` kullanılabilir.
 
 Girdiler (servis, paket, port vb.) doğrulanır. Komutlar argv olarak verildiği için komut enjeksiyonuna kapalıdır. Çıktılar JSON döner, uzun çıktılar kırpılır, komutlar zaman aşımına uğrar.
 

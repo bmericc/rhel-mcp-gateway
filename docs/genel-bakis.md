@@ -133,7 +133,7 @@ Gateway, her sunucu için tanımlanan Cockpit hesabının yetkileriyle çalış�
 
 Değişiklik araçları `confirm: true` parametresi olmadan çalıştırılmaz; bu durumda yalnızca yapılacak işlemin önizlemesi döner.
 
-> `available_updates` ve `install_updates`, `/etc/os-release` üzerinden seçilerek hem `dnf` (RHEL ailesi) hem `apt` (Debian/Ubuntu) destekler. Diğer paket ve güvenlik duvarı araçları RHEL ailesi (`dnf`, `firewalld`) için tasarlanmıştır; diğer dağıtımlarda bu işlemler `run_remote_command` ile yapılabilir.
+> Paket araçları (`available_updates`, `install_updates`, `package_info`, `package_install`, `package_remove`), `/etc/os-release` üzerinden seçilerek hem `dnf` (RHEL ailesi) hem `apt` (Debian/Ubuntu) destekler. Güvenlik duvarı araçları RHEL ailesi (`firewalld`) için tasarlanmıştır; diğer dağıtımlarda bu işlemler `run_remote_command` ile yapılabilir.
 
 ## 6. Güvenlik
 
@@ -197,7 +197,7 @@ Yapılandırma değişkenlerinin tam listesi için [README](../README.tr.md#orta
 
 ## 9. Yol haritası
 
-- Debian/Ubuntu ailesi için paket (`apt`) ve güvenlik duvarı (`ufw`) araçları.
+- Debian/Ubuntu ailesi için güvenlik duvarı (`ufw`) araçları.
 - SSH sunucu anahtarı doğrulaması ve sıkılaştırılmış TLS ayarları.
 
 ## 10. Lisans
