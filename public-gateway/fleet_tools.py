@@ -463,7 +463,8 @@ async def install_updates(run: Runner, args: dict) -> dict:
                 return {"package_manager": "apt", "note": t("No pending security updates.")}
             argv = [*_APT_GET, "install", "--only-upgrade", *names]
         else:
-            argv = [*_APT_GET, "upgrade"]
+            # Düz `upgrade` yeni bağımlılık gerektiren paketleri (örn. çekirdek) atlar
+            argv = [*_APT_GET, "upgrade", "--with-new-pkgs"]
         out = result_dict(await run(argv, privileged=True, timeout=LONG_TIMEOUT))
         out["package_manager"] = "apt"
         return out
@@ -606,7 +607,7 @@ TOOLS: list[ToolSpec] = [
         install_updates, read_only=False,
         preview=lambda a: (
             "dnf -y upgrade --security | apt-get update && apt-get -y install --only-upgrade <security packages>"
-            if a.get("security_only") else "dnf -y upgrade | apt-get update && apt-get -y upgrade"
+            if a.get("security_only") else "dnf -y upgrade | apt-get update && apt-get -y upgrade --with-new-pkgs"
         ),
     ),
     ToolSpec(

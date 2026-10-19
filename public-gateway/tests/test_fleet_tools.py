@@ -332,7 +332,7 @@ async def test_install_updates_apt(ssh):
     assert data["package_manager"] == "apt"
     assert ssh["commands"][-1] == (
         "env LC_ALL=C env DEBIAN_FRONTEND=noninteractive apt-get -y "
-        "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade"
+        "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs"
     )
 
 
