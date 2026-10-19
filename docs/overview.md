@@ -135,7 +135,7 @@ The gateway works with the privileges of the Cockpit account defined for each se
 
 Change tools are not executed without the `confirm: true` parameter; in that case only a preview of the operation is returned.
 
-> The package and firewall tools are designed for the RHEL family (`dnf`, `firewalld`). On other distributions these operations can be done with `run_remote_command`.
+> `available_updates` and `install_updates` support both `dnf` (RHEL family) and `apt` (Debian/Ubuntu), chosen from `/etc/os-release`. The other package and firewall tools are designed for the RHEL family (`dnf`, `firewalld`); on other distributions these operations can be done with `run_remote_command`.
 
 ## 6. Security
 

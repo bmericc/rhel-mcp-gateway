@@ -209,6 +209,54 @@ def parse_dnf_list(text: str) -> list[dict]:
     return items
 
 
+_APT_LINE_RE = re.compile(r"^(?P<package>[^/\s]+)/(?P<suites>\S+)\s+(?P<version>\S+)\s+(?P<arch>\S+)(?:\s+\[upgradable from: (?P<current>[^\]]+)\])?")
+
+
+def parse_apt_upgradable(text: str) -> list[dict]:
+    """`apt list --upgradable` satırlarını ayrıştırır."""
+    # "openssl/jammy-updates,jammy-security 3.0.2-0ubuntu1.10 amd64 [upgradable from: 3.0.2-0ubuntu1.9]"
+    items = []
+    for line in text.splitlines():
+        m = _APT_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        suites = m["suites"].split(",")
+        items.append({
+            "package": m["package"],
+            "version": m["version"],
+            "arch": m["arch"],
+            "current_version": m["current"],
+            "repo": m["suites"],
+            "security": any(s.endswith("-security") for s in suites),
+        })
+    return items
+
+
+async def detect_package_manager(run: Runner) -> str:
+    """Debian/Ubuntu ailesinde "apt", diğerlerinde (RHEL ailesi) "dnf"."""
+    r = await run(["cat", "/etc/os-release"])
+    info = parse_os_release(r.stdout)
+    family = {info.get("ID", "").lower(), *info.get("ID_LIKE", "").lower().split()}
+    return "apt" if family & {"debian", "ubuntu"} else "dnf"
+
+
+# apt-get'in soru sormaması ve değişmiş yapılandırma dosyalarını koruması için
+_APT_GET = [
+    "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y",
+    "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
+]
+
+
+async def _apt_upgradable(run: Runner) -> tuple[list[dict] | None, CommandResult]:
+    refresh = await run(["apt-get", "update", "-q"], privileged=True, timeout=LONG_TIMEOUT)
+    if refresh.exit_status != 0:
+        return None, refresh
+    r = await run(["apt", "list", "--upgradable"], timeout=LONG_TIMEOUT)
+    if r.exit_status != 0:
+        return None, r
+    return parse_apt_upgradable(r.stdout), r
+
+
 # --- Araç tanımları ---
 
 Handler = Callable[[Runner, dict], Awaitable[Any]]
@@ -358,6 +406,13 @@ async def selinux_status(run: Runner, args: dict) -> dict:
 
 async def available_updates(run: Runner, args: dict) -> dict:
     security_only = bool(args.get("security_only"))
+    if await detect_package_manager(run) == "apt":
+        updates, r = await _apt_upgradable(run)
+        if updates is None:
+            return {"error": truncate(r.stderr or r.stdout), "exit_status": r.exit_status}
+        if security_only:
+            updates = [u for u in updates if u["security"]]
+        return {"package_manager": "apt", "security_only": security_only, "count": len(updates), "updates": updates}
     if security_only:
         r = await run(["dnf", "-q", "updateinfo", "list", "--security"], privileged=True, timeout=LONG_TIMEOUT)
     else:
@@ -366,7 +421,7 @@ async def available_updates(run: Runner, args: dict) -> dict:
     if r.exit_status not in (0, 100):
         return {"error": truncate(r.stderr or r.stdout), "exit_status": r.exit_status}
     updates = parse_dnf_list(r.stdout)
-    return {"security_only": security_only, "count": len(updates), "updates": updates}
+    return {"package_manager": "dnf", "security_only": security_only, "count": len(updates), "updates": updates}
 
 
 async def package_info(run: Runner, args: dict) -> dict:
@@ -396,10 +451,29 @@ async def service_action(run: Runner, args: dict) -> dict:
 
 
 async def install_updates(run: Runner, args: dict) -> dict:
+    security_only = bool(args.get("security_only"))
+    if await detect_package_manager(run) == "apt":
+        updates, r = await _apt_upgradable(run)
+        if updates is None:
+            return result_dict(r)
+        if security_only:
+            # apt-get'in --security seçeneği yok; sadece güvenlik deposundan gelen paketler yükseltilir
+            names = [validate_package(u["package"]) for u in updates if u["security"]]
+            if not names:
+                return {"package_manager": "apt", "note": t("No pending security updates.")}
+            argv = [*_APT_GET, "install", "--only-upgrade", *names]
+        else:
+            # Düz `upgrade` yeni bağımlılık gerektiren paketleri (örn. çekirdek) atlar
+            argv = [*_APT_GET, "upgrade", "--with-new-pkgs"]
+        out = result_dict(await run(argv, privileged=True, timeout=LONG_TIMEOUT))
+        out["package_manager"] = "apt"
+        return out
     argv = ["dnf", "-y", "upgrade"]
-    if args.get("security_only"):
+    if security_only:
         argv.append("--security")
-    return result_dict(await run(argv, privileged=True, timeout=LONG_TIMEOUT))
+    out = result_dict(await run(argv, privileged=True, timeout=LONG_TIMEOUT))
+    out["package_manager"] = "dnf"
+    return out
 
 
 async def package_install(run: Runner, args: dict) -> dict:
@@ -506,7 +580,7 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "available_updates",
-        "Lists pending package updates.",
+        "Lists pending package updates (dnf on RHEL family, apt on Debian/Ubuntu).",
         {"security_only": {"type": "boolean", "description": "Security updates only"}},
         available_updates,
     ),
@@ -528,10 +602,13 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "install_updates",
-        "Installs package updates with dnf.",
+        "Installs package updates (dnf on RHEL family, apt on Debian/Ubuntu).",
         {"security_only": {"type": "boolean", "description": "Security updates only"}},
         install_updates, read_only=False,
-        preview=lambda a: "dnf -y upgrade" + (" --security" if a.get("security_only") else ""),
+        preview=lambda a: (
+            "dnf -y upgrade --security | apt-get update && apt-get -y install --only-upgrade <security packages>"
+            if a.get("security_only") else "dnf -y upgrade | apt-get update && apt-get -y upgrade --with-new-pkgs"
+        ),
     ),
     ToolSpec(
         "package_install",

@@ -44,6 +44,19 @@ RHSA-2026:1234 Important/Sec. openssl-1:3.0.7-27.el9.x86_64
 RHSA-2026:1300 Moderate/Sec.  curl-7.76.1-29.el9.x86_64
 """
 
+UBUNTU_OS_RELEASE = """\
+NAME="Ubuntu"
+ID=ubuntu
+ID_LIKE=debian
+PRETTY_NAME="Ubuntu 24.04.1 LTS"
+"""
+
+APT_UPGRADABLE = """\
+Listing...
+openssl/noble-updates,noble-security 3.0.13-0ubuntu3.4 amd64 [upgradable from: 3.0.13-0ubuntu3.1]
+curl/noble-updates 8.5.0-2ubuntu10.5 amd64 [upgradable from: 8.5.0-2ubuntu10.4]
+"""
+
 
 def test_parse_free_bytes():
     out = fleet_tools.parse_free_bytes(FREE_B)
@@ -83,6 +96,15 @@ def test_parse_dnf_check_update():
         {"package": "openssl.x86_64", "version": "1:3.0.7-27.el9", "repo": "rhel-9-baseos-rpms"},
         {"package": "kernel.x86_64", "version": "5.14.0-427.el9", "repo": "rhel-9-baseos-rpms"},
     ]
+
+
+def test_parse_apt_upgradable():
+    items = fleet_tools.parse_apt_upgradable(APT_UPGRADABLE)
+    assert [i["package"] for i in items] == ["openssl", "curl"]
+    assert items[0]["version"] == "3.0.13-0ubuntu3.4"
+    assert items[0]["current_version"] == "3.0.13-0ubuntu3.1"
+    assert items[0]["security"] is True
+    assert items[1]["security"] is False
 
 
 def test_parse_dnf_updateinfo():
@@ -277,6 +299,54 @@ async def test_available_updates_error(ssh):
     ssh["script"] = [("check-update", Result(1, "", "Error: Failed to download metadata"))]
     data = payload(await call("available_updates", {"server_name": "root-box"}))
     assert "Failed to download metadata" in data["error"]
+
+
+@pytestmark_anyio
+async def test_available_updates_apt(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("--upgradable", Result(0, APT_UPGRADABLE))]
+    data = payload(await call("available_updates", {"server_name": "user-box"}))
+    assert data["package_manager"] == "apt"
+    assert data["count"] == 2
+    assert "sudo -n env LC_ALL=C apt-get update -q" in ssh["commands"]
+    assert not any("dnf" in c for c in ssh["commands"])
+
+
+@pytestmark_anyio
+async def test_available_updates_apt_security_only(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("--upgradable", Result(0, APT_UPGRADABLE))]
+    data = payload(await call("available_updates", {"server_name": "root-box", "security_only": True}))
+    assert [u["package"] for u in data["updates"]] == ["openssl"]
+
+
+@pytestmark_anyio
+async def test_available_updates_apt_update_error(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("apt-get update", Result(100, "", "E: Could not get lock"))]
+    data = payload(await call("available_updates", {"server_name": "root-box"}))
+    assert "Could not get lock" in data["error"]
+
+
+@pytestmark_anyio
+async def test_install_updates_apt(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("--upgradable", Result(0, APT_UPGRADABLE))]
+    data = payload(await call("install_updates", {"server_name": "root-box", "confirm": True}))
+    assert data["package_manager"] == "apt"
+    assert ssh["commands"][-1] == (
+        "env LC_ALL=C env DEBIAN_FRONTEND=noninteractive apt-get -y "
+        "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs"
+    )
+
+
+@pytestmark_anyio
+async def test_install_updates_apt_security_only(ssh):
+    ssh["script"] = [("os-release", Result(0, UBUNTU_OS_RELEASE)), ("--upgradable", Result(0, APT_UPGRADABLE))]
+    await call("install_updates", {"server_name": "root-box", "security_only": True, "confirm": True})
+    assert ssh["commands"][-1].endswith("install --only-upgrade openssl")
+
+
+@pytestmark_anyio
+async def test_install_updates_dnf(ssh):
+    await call("install_updates", {"server_name": "root-box", "security_only": True, "confirm": True})
+    assert ssh["commands"][-1] == "env LC_ALL=C dnf -y upgrade --security"
 
 
 @pytestmark_anyio
