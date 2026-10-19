@@ -133,7 +133,7 @@ Gateway, her sunucu için tanımlanan Cockpit hesabının yetkileriyle çalış�
 
 Değişiklik araçları `confirm: true` parametresi olmadan çalıştırılmaz; bu durumda yalnızca yapılacak işlemin önizlemesi döner.
 
-> Paket ve güvenlik duvarı araçları RHEL ailesi (`dnf`, `firewalld`) için tasarlanmıştır. Diğer dağıtımlarda bu işlemler `run_remote_command` ile yapılabilir.
+> `available_updates` ve `install_updates`, `/etc/os-release` üzerinden seçilerek hem `dnf` (RHEL ailesi) hem `apt` (Debian/Ubuntu) destekler. Diğer paket ve güvenlik duvarı araçları RHEL ailesi (`dnf`, `firewalld`) için tasarlanmıştır; diğer dağıtımlarda bu işlemler `run_remote_command` ile yapılabilir.
 
 ## 6. Güvenlik
 

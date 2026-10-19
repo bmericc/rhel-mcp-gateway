@@ -223,7 +223,8 @@ TR = {
     "Returns the firewalld state and active rules.": "firewalld durumunu ve aktif kuralları döndürür.",
     "Returns the SELinux mode and recent SELinux (AVC) denials.":
         "SELinux modunu ve son SELinux (AVC) engellemelerini döndürür.",
-    "Lists pending package updates.": "Bekleyen paket güncellemelerini listeler.",
+    "Lists pending package updates (dnf on RHEL family, apt on Debian/Ubuntu).":
+        "Bekleyen paket güncellemelerini listeler (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
     "Security updates only": "Sadece güvenlik güncellemeleri",
     "Returns whether a package is installed, its version and its dnf info.":
         "Bir paketin kurulu olup olmadığını, sürümünü ve dnf bilgisini döndürür.",
@@ -231,7 +232,9 @@ TR = {
     "Starts, stops, restarts, reloads, enables or disables a systemd service.":
         "Bir systemd servisini başlatır, durdurur, yeniden başlatır, yeniden yükler, etkinleştirir veya devre dışı bırakır.",
     "Service name": "Servis adı",
-    "Installs package updates with dnf.": "dnf ile paket güncellemelerini kurar.",
+    "Installs package updates (dnf on RHEL family, apt on Debian/Ubuntu).":
+        "Paket güncellemelerini kurar (RHEL ailesinde dnf, Debian/Ubuntu'da apt).",
+    "No pending security updates.": "Bekleyen güvenlik güncellemesi yok.",
     "Installs packages with dnf.": "dnf ile paket kurar.",
     "Package names": "Paket adları",
     "Removes packages with dnf.": "dnf ile paket kaldırır.",

@@ -155,13 +155,13 @@ Every tool output says which route was used: `"connection": {"via": "cockpit" | 
 | Tool | Description |
 | --- | --- |
 | `service_action` | start / stop / restart / reload / enable / disable |
-| `install_updates` | `dnf upgrade` (optionally security only) |
+| `install_updates` | `dnf upgrade` / `apt-get upgrade` (optionally security only) |
 | `package_install` / `package_remove` | Install / remove packages with dnf |
 | `firewall_rule` | Add/remove a permanent port/service rule |
 | `reboot_server` | Reboot |
 | `run_remote_command` | Arbitrary command (administrator privileges with `as_root`) |
 
-The package and firewall tools are for the RHEL family (`dnf`, `firewalld`). On Debian/Ubuntu servers `run_remote_command` can be used instead.
+`available_updates` and `install_updates` detect the distribution from `/etc/os-release` and use `dnf` on the RHEL family and `apt` on Debian/Ubuntu. The other package and firewall tools are for the RHEL family (`dnf`, `firewalld`); on Debian/Ubuntu servers `run_remote_command` can be used instead.
 
 Inputs (service, package, port etc.) are validated. Commands are passed as argv, so they are not open to command injection. Outputs are returned as JSON, long outputs are truncated, and commands time out.
 
